@@ -21,7 +21,7 @@
 
 <p align="center">
   <a href="https://github.com/samugit83/redamon/stargazers"><img height="24" src="https://img.shields.io/github/stars/samugit83/redamon?style=flat&color=2E8B57&label=Stars" alt="GitHub Stars"/></a>
-  <img height="24" src="https://img.shields.io/badge/v4.7.1-release-2E8B57?style=flat" alt="Version 4.7.1"/>
+  <img height="24" src="https://img.shields.io/badge/v4.8.0-release-2E8B57?style=flat" alt="Version 4.8.0"/>
   <img height="24" src="https://img.shields.io/badge/WARNING-SECURITY%20TOOL-B22222?style=flat" alt="Security Tool Warning"/>
   <img height="24" src="https://img.shields.io/badge/LICENSE-MIT-4169A1?style=flat" alt="MIT License"/>
   <img height="24" src="https://img.shields.io/badge/END--TO--END-PIPELINE-A01025?style=flat" alt="End-to-End Pipeline"/>
@@ -465,6 +465,12 @@ A fully automated, **parallelized** scanning engine running inside a Kali Linux 
 Run **any single tool** from the pipeline independently without re-running the entire scan. Up to **12 partial recons can run in parallel** per project, each with independent logs, stop controls, and status badges visible in both the Graph toolbar and Project Settings header. Each tool section has a play button that opens a modal where you can review existing graph data, add custom targets (subdomains, IPs, ports, or URLs), and launch the tool in isolation. Results are merged back into the Neo4j graph using `MERGE` operations -- duplicates are updated, not recreated. The tool runs with all project settings (timeouts, wordlists, API keys, proxy) applied automatically. All pipeline tools support partial recon.
 
 > **[Wiki: Recon Pipeline Workflow -- Partial Recon](https://github.com/samugit83/redamon/wiki/Recon-Pipeline-Workflow#partial-recon)**
+
+#### AI in Pipeline
+
+Optional **LLM-augmented decision points** wired inside the recon pipeline where static look-ups historically drift -- **Nuclei** prunes its tag list to the detected tech stack, the **WAF classifier** catches header-stripped Cloudflare/AWS WAF/Imperva, and many others across FFuf, Nuclei false-positive filtering, and subdomain-takeover disambiguation. Each hook is a **cascade fallback** after the static path with a deterministic safe fallback, so an LLM outage cannot break a scan. One master toggle in the Target tab governs them all.
+
+> **[Wiki: AI in Pipeline](https://github.com/samugit83/redamon/wiki/Recon-Pipeline-Workflow#ai-in-pipeline)**
 
 ### GVM Vulnerability Scanner
 

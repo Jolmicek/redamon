@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 
+## [4.8.0] - 2026-05-06
+
+### Added — AI in Pipeline (5 hooks)
+
+LLM-augmented decision points across the recon pipeline, each gated by the `aiInPipeline` master toggle. Every hook is a **cascade fallback** after the existing static path -- never replaces it -- and returns a deterministic safe fallback on any LLM failure, so an agent outage cannot break a scan.
+
+- **FFuf: AI for Extensions** -- per-target HEAD probe + LLM picks the file extensions that match the detected stack (Server / X-Powered-By / X-AspNet-Version). Static `ffufExtensions` ignored when on. Per-fingerprint cache. ([recon/helpers/ai_planner/ffuf_extensions.py](recon/helpers/ai_planner/ffuf_extensions.py), `POST /llm/ffuf-extensions`). Typical impact: **30-50% fewer FFuf requests** with no recall loss
+- **Nuclei: AI for Tag Selection** -- per-scan, prunes `nucleiTags` to ones matching the detected tech stack (drops `wordpress` on Node, adds `apache`/`wp-plugin` when detected). Candidate pool built live from the templates volume (~125 broad-category tags). ([recon/helpers/ai_planner/nuclei_tags.py](recon/helpers/ai_planner/nuclei_tags.py), `POST /llm/nuclei-tags`). Typical impact: **~50% fewer templates loaded**
+- **WAF AI Classifier** -- second pass after `_has_cdn_markers()` static token check. Scores WAF presence 0-100 from headers + body fingerprints + cookies + latency, catching header-stripped Cloudflare / Imperva / Akamai / F5. Confidence ≥70 flips the verdict. ([recon/helpers/ai_planner/waf_classifier.py](recon/helpers/ai_planner/waf_classifier.py), `POST /llm/waf-classify`). Reduces false negatives in `check_waf_bypass`
+- **Nuclei: AI Response Filter** -- second pass after the keyword-based WAF/rate-limit detection in `is_false_positive`. Only fires on suspicious status (403/406/418/429/503) + injection-class tag, so cost stays bounded. Catches rebranded WAF blocks (AWS WAF JSON, custom Imperva, Fortinet) the keyword list misses, and avoids false positives on legit pages mentioning "WAF" / "Access Denied". ([recon/helpers/ai_planner/nuclei_response_filter.py](recon/helpers/ai_planner/nuclei_response_filter.py), `POST /llm/nuclei-fp-filter`)
+- **Takeover: AI Classifier** -- enrichment pass between CNAME validation and dedupe. Probes each candidate; vendor-token short-circuit (`Heroku-Request-Id`, `x-amz-bucket-region`, ...) skips the LLM when the SaaS fingerprint is genuine. Otherwise the LLM classifies the body as real unclaimed page or WAF "no-host" 404. AI-flagged collisions get `ai_waf_likely=true` and a -40 score penalty in `score_finding`, deflecting WAF false positives into `manual_review` instead of `confirmed`. ([recon/helpers/ai_planner/takeover_classifier.py](recon/helpers/ai_planner/takeover_classifier.py), `POST /llm/takeover-classify`)
+
+### Added — UI
+
+- **`AiToggleLabel` shared component** ([webapp/src/components/projects/ProjectForm/AiToggleLabel.tsx](webapp/src/components/projects/ProjectForm/AiToggleLabel.tsx)) -- violet Sparkles icon + label + Info-tooltip on hover. Used across Target / FFuf / Nuclei / Security Checks / Takeover sections so AI features are visually distinct
+- **AI in Pipeline panel** in the Target tab -- 240px scrollable list of 5 per-tool toggles, driven by a data array (future hooks add a row, not JSX). Master `aiInPipeline` toggle cascades all 5 flags
+- **Bidirectional toggle sync** -- each per-tool AI toggle in its own module section binds to the same form field as the Target panel; flipping either updates both automatically
+
+### Added — Settings cascade
+
+- `AI_IN_PIPELINE` master setting governs five flags: `FFUF_AI_EXTENSIONS`, `NUCLEI_AI_TAGS`, `WAF_AI_CLASSIFIER`, `NUCLEI_AI_RESPONSE_FILTER`, `TAKEOVER_AI_CLASSIFIER`. Off forces all five off (defense-in-depth against drift). [project_settings.py:apply_ai_pipeline_overrides](recon/project_settings.py)
+- `AI_PIPELINE_MODEL` independently picks the model used by every hook (the recon container delegates LLM calls to the agent's `/llm/*` endpoints, so per-user provider keys live in one place)
+
+### Fixed
+
+- **Apex BaseURL graph orphan** ([graph_db/mixins/recon/vuln_mixin.py](graph_db/mixins/recon/vuln_mixin.py)) -- the existing orphan-cleanup pass linked Subdomain -[:HAS_BASE_URL]-> BaseURL but skipped apex URLs (`https://example.com`) because the host matched a `Domain` node, not a `Subdomain`. New apex pass attaches those to `Domain`, fixing the disconnected island that security-check findings on the apex were producing
+- **Pre-existing crash on `response: null`** in [is_false_positive()](recon/helpers/nuclei_helpers.py) -- Nuclei DNS templates emit `{"response": null}` and the static path called `response.lower()` without coercion. Coerced to empty string
+
+### Tests
+
+- 13 new test files: validators, fingerprint stability, cascade gating, settings cascade, score penalty, multi-finding cache reuse, probe robustness, per-finding error isolation. All seven AI suites green.
+
+---
+
+
 ## [4.7.1] - 2026-05-05
 
 ### Fixed

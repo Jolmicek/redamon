@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useMemo } from 'react'
-import { ChevronDown, Target, ShieldAlert, AlertTriangle, Sparkles } from 'lucide-react'
+import { ChevronDown, Target, ShieldAlert, AlertTriangle } from 'lucide-react'
 import { AiToggleLabel } from '../AiToggleLabel'
 import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
@@ -287,10 +287,6 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
 
               {/* AI in Pipeline (master toggle, model picker, per-tool toggles) */}
               <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>
-                  <Sparkles size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-                  AI in Pipeline
-                </h3>
                 <div className={styles.toggleRow} style={{ gap: 'var(--space-4)', alignItems: 'center' }}>
                   <AiToggleLabel
                     label="Enable AI in Pipeline"
