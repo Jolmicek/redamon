@@ -408,6 +408,7 @@ services:
       WS_MAX_MESSAGE_SIZE: "10485760"
       # MCP tool servers (internal docker network)
       MCP_NETWORK_RECON_URL: http://kali-sandbox:8000/sse
+      MCP_NUCLEI_URL: http://kali-sandbox:8002/sse
       MCP_NMAP_URL: http://kali-sandbox:8004/sse
       MCP_METASPLOIT_URL: http://kali-sandbox:8003/sse
       MCP_PLAYWRIGHT_URL: http://kali-sandbox:8005/sse
