@@ -119,14 +119,14 @@ def setup_llm(
                 default_headers=custom_llm_config.get("defaultHeaders") or {},
                 timeout=float(custom_llm_config.get("timeout", 120)),
                 max_tokens=custom_llm_config.get("maxTokens", 16384),
-                # FIX: Survive transient VPS network blips. SDK default is
-                # max_retries=2 with ~3s total budget. Network spikes on this
-                # path can last 5-10s, so 2 retries fail before the spike
-                # clears. 5 retries spread over ~30s ride out any reasonable
-                # blip. default_request_timeout=60s overrides httpx's default
-                # 5s connect timeout that fails mid-handshake during spikes.
+                # Survive transient network blips. SDK default max_retries=2
+                # with ~3s total budget fails through spikes lasting 5-10s; 5
+                # retries spread over ~30s ride out any reasonable blip. The
+                # per-request timeout is user-configurable via the `timeout`
+                # kwarg above (alias of default_request_timeout in
+                # langchain_anthropic — passing both would silently let the
+                # user value win, so we keep only the configurable one).
                 max_retries=5,
-                default_request_timeout=300.0,  # 5 min - generous for Opus heavy prompts but trips before Anthropic 10-min server timeout
             )
             if _anthropic_supports_temperature(anth_model):
                 anth_kwargs["temperature"] = custom_llm_config.get("temperature", 0)
@@ -302,10 +302,11 @@ def setup_llm(
             model=api_model,
             api_key=anthropic_api_key,
             max_tokens=16384,
-            # FIX: Survive transient VPS network blips. See comment on the
-            # custom-provider path above for full rationale.
+            # Survive transient network blips: see custom-provider path for
+            # max_retries rationale. 300s is below Anthropic's 10-min
+            # server-side cap but generous for Opus heavy prompts.
             max_retries=5,
-            default_request_timeout=300.0,  # 5 min - generous for Opus heavy prompts but trips before Anthropic 10-min server timeout
+            default_request_timeout=300.0,
         )
         if _anthropic_supports_temperature(api_model):
             anth_kwargs["temperature"] = 0
