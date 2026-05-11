@@ -75,10 +75,8 @@ class _PermanentAuthError(Exception):
 
 class IsTransientLLMErrorTests(unittest.TestCase):
     def setUp(self):
-        from orchestrator_helpers.nodes.fireteam_member_think_node import (
-            _is_transient_llm_error,
-        )
-        self.fn = _is_transient_llm_error
+        from orchestrator_helpers.llm_retry import is_transient_llm_error
+        self.fn = is_transient_llm_error
 
     # ----- Type-MRO match (the optimization's new path) -----
 
@@ -259,7 +257,7 @@ class FireteamMemberRetryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "orchestrator_helpers.nodes.fireteam_member_think_node.chain_graph",
             MagicMock(),
         ), patch(
-            "orchestrator_helpers.nodes.fireteam_member_think_node.asyncio.sleep",
+            "orchestrator_helpers.llm_retry.asyncio.sleep",
             new_callable=AsyncMock,
         ) as mock_sleep:
             update = await fireteam_member_think_node(

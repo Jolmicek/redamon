@@ -14,7 +14,6 @@ forbidden-action stripping and escalation paths.
 
 import asyncio
 import logging
-import re
 from typing import Optional
 from uuid import uuid4
 
@@ -23,40 +22,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from state import LLMDecision, FireteamMemberState, TargetInfo, format_chain_context
 from orchestrator_helpers.parsing import try_parse_llm_decision
 from orchestrator_helpers.json_utils import normalize_content, json_dumps_safe
+from orchestrator_helpers.llm_retry import retry_llm_call
 import orchestrator_helpers.chain_graph_writer as chain_graph
 from project_settings import get_setting, get_allowed_tools_for_phase, DANGEROUS_TOOLS
 from tools import set_tenant_context, set_phase_context, set_graph_view_context
 
 logger = logging.getLogger(__name__)
-
-
-_TRANSIENT_EXC_NAMES = frozenset({
-    "APIConnectionError", "APITimeoutError", "RateLimitError",
-    "InternalServerError", "ServiceUnavailableError", "OverloadedError",
-    "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
-    "PoolTimeout", "TimeoutException", "RemoteProtocolError",
-})
-
-_TRANSIENT_KEYWORDS = (
-    "connection", "timeout", "timed out", "overloaded",
-    "rate_limit", "rate limit", "apiconnectionerror",
-    "service unavailable", "bad gateway", "gateway timeout",
-    "internal server error", "server_error",
-)
-
-# Word-boundary match so "500" does not fire on "50000" (e.g. a max_tokens
-# error like "max_tokens 50000 exceeded" must NOT be classified transient).
-_TRANSIENT_STATUS_RE = re.compile(r"\b(429|500|502|503|504|529)\b")
-
-
-def _is_transient_llm_error(exc: BaseException) -> bool:
-    for base in type(exc).__mro__:
-        if base.__name__ in _TRANSIENT_EXC_NAMES:
-            return True
-    err_str = str(exc).lower()
-    if any(k in err_str for k in _TRANSIENT_KEYWORDS):
-        return True
-    return bool(_TRANSIENT_STATUS_RE.search(err_str))
 
 
 # ---------- Exit nodes ----------
@@ -803,31 +774,17 @@ async def fireteam_member_think_node(
                 )
             ))
 
-        response = None
-        last_conn_exc = None
-        _MAX_CONN_ATTEMPTS = 3
-        for _conn_attempt in range(_MAX_CONN_ATTEMPTS):
-            try:
-                response = await llm.ainvoke(llm_messages)
-                last_conn_exc = None
-                break
-            except Exception as exc:
-                last_conn_exc = exc
-                is_transient = _is_transient_llm_error(exc)
-                logger.warning(
-                    "[%s] member %s LLM attempt %d/%d error (transient=%s, type=%s): %s",
-                    session_id, member_id, _conn_attempt + 1, _MAX_CONN_ATTEMPTS,
-                    is_transient, type(exc).__name__, exc,
-                )
-                if not is_transient:
-                    break
-                if _conn_attempt < _MAX_CONN_ATTEMPTS - 1:
-                    await asyncio.sleep(min(2 ** _conn_attempt, 8))
-        if response is None:
-            logger.error("[%s] member %s LLM call failed after 3 attempts: %s", session_id, member_id, last_conn_exc)
+        try:
+            response = await retry_llm_call(
+                llm, llm_messages, label=f"{session_id} member {member_id}",
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] member %s LLM call failed: %s", session_id, member_id, exc,
+            )
             return {
                 "task_complete": True,
-                "completion_reason": f"llm_error after 3 attempts: {last_conn_exc}",
+                "completion_reason": f"llm_error: {exc}",
             }
 
         raw_content = normalize_content(response.content if hasattr(response, "content") else response)
