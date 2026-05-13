@@ -419,7 +419,7 @@ services:
       WEBAPP_API_URL: http://webapp:3000
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-changeme}
       # Knowledge Base
-      KB_ENABLED: "${KB_ENABLED:-true}"
+      KB_ENABLED: "${KB_ENABLED:-false}"
       KB_PATH: /app/knowledge_base/data
       # Fireteam requires AsyncPostgresSaver for safe mid-wave checkpointing.
       PERSISTENT_CHECKPOINTER: "true"

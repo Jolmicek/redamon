@@ -576,7 +576,7 @@ def remove_mcp_manifest_entries() -> None:
 
 
 # Simplified web_search entry used when Knowledge Base is not available
-# (--skipkbase install or missing KB dependencies). Replaces the full
+# (default install without --kbase, or missing KB dependencies). Replaces the full
 # KB-centric entry in TOOL_REGISTRY at runtime via orchestrator.py.
 WEB_SEARCH_TAVILY_ONLY = {
     "purpose": "Web search via Tavily",
