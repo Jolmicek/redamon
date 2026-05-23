@@ -354,12 +354,12 @@ export function HttpxSection({ data, updateField, onRun }: HttpxSectionProps) {
           <div className={styles.subSection}>
             <h3 className={styles.subSectionTitle}>AI Surface Recon</h3>
             <p className={styles.fieldHint} style={{ marginBottom: '0.5rem' }}>
-              Annotate captured response data against AI vendor catalogues. All hooks are passive (no extra HTTP traffic) and write to <code>BaseURL.is_ai_framework_detected</code> / <code>ai_framework_name</code> / <code>ai_frontend_product_guess</code>.
+              Annotate captured response data against AI vendor catalogues. All hooks are passive (no extra HTTP traffic) and write to BaseURL.is_ai_framework_detected / ai_framework_name / ai_frontend_product_guess.
             </p>
             <div className={styles.toggleRow}>
               <div>
                 <span className={styles.toggleLabel}>AI Header Signatures</span>
-                <p className={styles.toggleDescription}>Regex response headers for AI runtime / framework / proxy / SDK-client markers (<code>x-vllm-*</code>, <code>anthropic-ratelimit-*</code>, <code>x-langchain-*</code>, <code>x-litellm-*</code>, <code>cf-aig-*</code>, <code>x-mcp-*</code>, …).</p>
+                <p className={styles.toggleDescription}>Regex response headers for AI runtime / framework / proxy / SDK-client markers (x-vllm-*, anthropic-ratelimit-*, x-langchain-*, x-litellm-*, cf-aig-*, x-mcp-*, …).</p>
               </div>
               <Toggle
                 checked={data.httpProbeAiHeaderScanEnabled ?? true}
@@ -379,7 +379,7 @@ export function HttpxSection({ data, updateField, onRun }: HttpxSectionProps) {
             <div className={styles.toggleRow}>
               <div>
                 <span className={styles.toggleLabel}>AI Title Regex</span>
-                <p className={styles.toggleDescription}>Match page <code>&lt;title&gt;</code> against AI frontend product names. Same products as the favicon catalogue; the title hit fills <code>ai_frontend_product_guess</code> when the favicon hash is unknown.</p>
+                <p className={styles.toggleDescription}>Match page title against AI frontend product names. Same products as the favicon catalogue; the title hit fills ai_frontend_product_guess when the favicon hash is unknown.</p>
               </div>
               <Toggle
                 checked={data.httpProbeAiTitleDetectionEnabled ?? true}

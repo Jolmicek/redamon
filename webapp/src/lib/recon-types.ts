@@ -175,7 +175,7 @@ export interface PartialReconParams {
   settings_overrides?: Record<string, unknown>
 }
 
-export const PARTIAL_RECON_SUPPORTED_TOOLS = new Set(['SubdomainDiscovery', 'Naabu', 'Masscan', 'Nmap', 'Httpx', 'Katana', 'Hakrawler', 'Jsluice', 'Gau', 'Kiterunner', 'ParamSpider', 'Arjun', 'Ffuf', 'JsRecon', 'GraphqlScan', 'Nuclei', 'SubdomainTakeover', 'VhostSni', 'SecurityChecks', 'Shodan', 'Urlscan', 'Uncover', 'OsintEnrichment'])
+export const PARTIAL_RECON_SUPPORTED_TOOLS = new Set(['SubdomainDiscovery', 'Naabu', 'Masscan', 'Nmap', 'Httpx', 'Katana', 'Hakrawler', 'Jsluice', 'Gau', 'Kiterunner', 'ParamSpider', 'Arjun', 'Ffuf', 'EndpointAiClassifier', 'JsRecon', 'GraphqlScan', 'Nuclei', 'SubdomainTakeover', 'VhostSni', 'SecurityChecks', 'Shodan', 'Urlscan', 'Uncover', 'OsintEnrichment'])
 
 export const PARTIAL_RECON_PHASE_MAP: Record<string, readonly string[]> = {
   SubdomainDiscovery: ['Subdomain Discovery'],
@@ -191,6 +191,7 @@ export const PARTIAL_RECON_PHASE_MAP: Record<string, readonly string[]> = {
   ParamSpider: ['Resource Enumeration'],
   Arjun: ['Resource Enumeration'],
   Ffuf: ['Resource Enumeration'],
+  EndpointAiClassifier: ['Endpoint AI Classification'],
   JsRecon: ['JS Recon'],
   GraphqlScan: ['Endpoint Discovery', 'Introspection Testing', 'Schema Analysis', 'Vulnerability Detection'],
   Nuclei: ['Vulnerability Scanning'],

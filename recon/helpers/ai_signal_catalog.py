@@ -383,6 +383,216 @@ AI_FAVICON_HASHES: dict[int, str] = {
 
 
 # ---------------------------------------------------------------------------
+# resource_enum  (AI_SURFACE_RECON.md §2.1 #6)
+# ---------------------------------------------------------------------------
+
+# Path regex catalogue. Matched against the URL path of every Endpoint
+# produced by Katana / Hakrawler / GAU / FFuf / ParamSpider / Arjun /
+# Kiterunner / jsluice. First match wins.
+#
+# Tuple shape: (path_regex, ai_interface_type).
+# ai_interface_type ∈ {llm-chat, llm-completion, llm-embedding, llm-tool-call,
+#                      sse-stream, mcp, llm-graphql, non-llm}.
+#
+# Ordering matters: more-specific patterns first (vendor-specific routes
+# outrank generic /generate / /stream which collide with image-gen and
+# server-sent-event endpoints).
+AI_PATH_PATTERNS: list[tuple[Pattern[str], str]] = [
+    # ── llm-chat ──────────────────────────────────────────────────────────
+    # OpenAI /v1/chat/completions — also Fireworks, Together, Mistral, TGI
+    # Sources: developers.openai.com/api/reference/overview, docs.fireworks.ai,
+    # docs.together.ai, docs.mistral.ai/api, huggingface.co/docs/text-generation-inference/messages_api
+    (re.compile(r"^/v1/chat/completions/?$", re.IGNORECASE), "llm-chat"),
+    # Groq prefixes OpenAI paths with /openai. Source: console.groq.com/docs/api-reference
+    (re.compile(r"^/openai/v1/chat/completions/?$", re.IGNORECASE), "llm-chat"),
+    # DeepSeek omits the /v1 prefix. Source: api-docs.deepseek.com/api/create-chat-completion
+    (re.compile(r"^/chat/completions/?$", re.IGNORECASE), "llm-chat"),
+    # Anthropic Messages. Source: platform.claude.com/docs/en/api/messages
+    (re.compile(r"^/v1/messages/?$", re.IGNORECASE), "llm-chat"),
+    # OpenAI Responses API. Source: developers.openai.com/api/reference/overview
+    (re.compile(r"^/v1/responses/?$", re.IGNORECASE), "llm-chat"),
+    # Ollama /api/chat (also Open WebUI proxy). Source: github.com/ollama/ollama/blob/main/docs/api.md
+    (re.compile(r"^/api/chat/?$", re.IGNORECASE), "llm-chat"),
+    # Gemini generateContent + streamGenerateContent. Source: ai.google.dev/api/generate-content
+    (re.compile(r"^/v1beta/models/[^/]+:generateContent$", re.IGNORECASE), "llm-chat"),
+    (re.compile(r"^/v1beta/models/[^/]+:streamGenerateContent$", re.IGNORECASE), "llm-chat"),
+    # Cohere v2 chat. Source: docs.cohere.com/reference/chat
+    (re.compile(r"^/v2/chat/?$", re.IGNORECASE), "llm-chat"),
+    # Perplexity Sonar. Source: docs.perplexity.ai/api-reference/chat-completions-post
+    (re.compile(r"^/v1/sonar/?$", re.IGNORECASE), "llm-chat"),
+
+    # ── llm-completion ────────────────────────────────────────────────────
+    # OpenAI legacy completions + TGI. Source: developers.openai.com,
+    # github.com/huggingface/text-generation-inference/blob/main/docs/openapi.json
+    (re.compile(r"^/v1/completions/?$", re.IGNORECASE), "llm-completion"),
+    # Mistral fill-in-middle. Source: docs.mistral.ai/api/endpoint/fim
+    (re.compile(r"^/v1/fim/completions/?$", re.IGNORECASE), "llm-completion"),
+    # Ollama /api/generate. Source: github.com/ollama/ollama/blob/main/docs/api.md
+    (re.compile(r"^/api/generate/?$", re.IGNORECASE), "llm-completion"),
+    # TGI standalone /generate (the non-stream variant). Source: TGI openapi.json
+    (re.compile(r"^/generate/?$", re.IGNORECASE), "llm-completion"),
+    # TGI SageMaker invoke. Source: TGI openapi.json
+    (re.compile(r"^/invocations/?$", re.IGNORECASE), "llm-completion"),
+
+    # ── llm-embedding ─────────────────────────────────────────────────────
+    # OpenAI /v1/embeddings (also Voyage, Mistral, Fireworks, Together).
+    # Sources: developers.openai.com, docs.voyageai.com/reference/embeddings-api
+    (re.compile(r"^/v1/embeddings/?$", re.IGNORECASE), "llm-embedding"),
+    # Ollama legacy. Source: github.com/ollama/ollama/blob/main/docs/api.md
+    (re.compile(r"^/api/embeddings/?$", re.IGNORECASE), "llm-embedding"),
+    # Ollama current. Source: same
+    (re.compile(r"^/api/embed/?$", re.IGNORECASE), "llm-embedding"),
+    # Cohere v2 embed. Source: docs.cohere.com/reference
+    (re.compile(r"^/v2/embed/?$", re.IGNORECASE), "llm-embedding"),
+    # Gemini embed (single + batch). Source: ai.google.dev/api/generate-content
+    (re.compile(r"^/v1beta/models/[^/]+:embedContent$", re.IGNORECASE), "llm-embedding"),
+    (re.compile(r"^/v1beta/models/[^/]+:batchEmbedContents$", re.IGNORECASE), "llm-embedding"),
+
+    # ── llm-tool-call ─────────────────────────────────────────────────────
+    # OpenAI Assistants runs + steps. Source: developers.openai.com/api/reference/overview
+    (re.compile(r"^/v1/threads/[^/]+/runs/?$", re.IGNORECASE), "llm-tool-call"),
+    (re.compile(r"^/v1/threads/[^/]+/runs/[^/]+/steps/?$", re.IGNORECASE), "llm-tool-call"),
+    # OpenAI Responses input_items. Source: same
+    (re.compile(r"^/v1/responses/[^/]+/input_items/?$", re.IGNORECASE), "llm-tool-call"),
+    # MCP JSON-RPC method name appearing as path on REST-style shims.
+    # Source: modelcontextprotocol.io/docs/concepts/tools
+    (re.compile(r"(?:^|/)tools/call/?$", re.IGNORECASE), "llm-tool-call"),
+
+    # ── sse-stream (path-only hint; Content-Type confirms) ────────────────
+    # TGI generate_stream. Source: TGI openapi.json
+    (re.compile(r"^/generate_stream/?$", re.IGNORECASE), "sse-stream"),
+    # LangServe runnable streaming surfaces. Source: github.com/langchain-ai/langserve README
+    (re.compile(r"(?:^|/)stream/?$", re.IGNORECASE), "sse-stream"),
+    (re.compile(r"(?:^|/)stream_log/?$", re.IGNORECASE), "sse-stream"),
+    (re.compile(r"(?:^|/)astream_events/?$", re.IGNORECASE), "sse-stream"),
+    (re.compile(r"(?:^|/)stream_events/?$", re.IGNORECASE), "sse-stream"),
+
+    # ── mcp (paths are implementation-defined per spec; these are the
+    # widely-used conventions). Source: modelcontextprotocol.io/specification/2025-03-26/basic/transports
+    (re.compile(r"^/mcp(/.*)?$", re.IGNORECASE), "mcp"),
+    (re.compile(r"^/api/mcp(/.*)?$", re.IGNORECASE), "mcp"),
+    (re.compile(r"^/sse/?$", re.IGNORECASE), "mcp"),
+    # MCP JSON-RPC method names appearing as path on REST-style shims.
+    # Source: modelcontextprotocol.io/docs/concepts/tools
+    (re.compile(r"(?:^|/)tools/list/?$", re.IGNORECASE), "mcp"),
+    (re.compile(r"(?:^|/)resources/list/?$", re.IGNORECASE), "mcp"),
+    (re.compile(r"(?:^|/)prompts/list/?$", re.IGNORECASE), "mcp"),
+
+    # ── llm-graphql (gated on parent-AI in the caller — too generic alone).
+    # Sources: apollographql.com docs, docs.weaviate.io/weaviate/api/rest
+    (re.compile(r"^/(api/)?graphql/?$", re.IGNORECASE), "llm-graphql"),
+    (re.compile(r"^/v1/graphql/?$", re.IGNORECASE), "llm-graphql"),
+]
+
+# RAG ingestion / retrieval path regex. Each entry is paired with a boolean
+# `requires_parent_ai`: when True, the caller must only flag is_ai_rag_ingest
+# if the parent BaseURL / Service is already AI-tagged (prevents tagging
+# every e-commerce search bar as a RAG endpoint).
+AI_RAG_PATH_PATTERNS: list[tuple[Pattern[str], bool]] = [
+    # ── Unambiguous vendor-specific RAG paths ─────────────────────────────
+    # OpenAI Files / Uploads / Vector Stores / Assistants.
+    # Source: developers.openai.com/api/reference/overview
+    (re.compile(r"^/v1/files/?$", re.IGNORECASE), False),
+    (re.compile(r"^/v1/uploads/?$", re.IGNORECASE), False),
+    (re.compile(r"^/v1/vector_stores(/[^/]+(/files|/search)?)?/?$", re.IGNORECASE), False),
+    (re.compile(r"^/v1/assistants/?$", re.IGNORECASE), False),
+    (re.compile(r"^/v1/threads/?$", re.IGNORECASE), False),
+    (re.compile(r"^/v1/threads/[^/]+/messages/?$", re.IGNORECASE), False),
+
+    # Pinecone upsert + query.
+    # Source: docs.pinecone.io/reference/api/2024-10/data-plane/{upsert,query}
+    (re.compile(r"^/vectors/upsert/?$", re.IGNORECASE), False),
+
+    # Weaviate object writes.
+    # Source: docs.weaviate.io/weaviate/api/rest
+    (re.compile(r"^/v1/objects/?$", re.IGNORECASE), False),
+    (re.compile(r"^/v1/batch/objects/?$", re.IGNORECASE), False),
+
+    # Qdrant points (collection-scoped).
+    # Source: qdrant.tech/documentation/concepts/points
+    (re.compile(r"^/collections/[^/]+/points(/(search|query))?/?$", re.IGNORECASE), False),
+
+    # ── Ambiguous paths — only flag when parent host is AI-tagged ─────────
+    # Sources: generic — most webapps name an endpoint /search or /upload.
+    # The parent_is_ai gate prevents tagging every e-commerce search bar.
+    (re.compile(r"^/(upload|files?)/?$", re.IGNORECASE), True),
+    (re.compile(r"^/(search|query|q)/?$", re.IGNORECASE), True),
+    (re.compile(r"^/(index|embed|embeddings)/?$", re.IGNORECASE), True),
+    (re.compile(r"^/(retrieve|lookup|knn|rag|vectorize|similarity[-_]?search)/?$", re.IGNORECASE), True),
+    (re.compile(r"^/(documents?|docs?)/?$", re.IGNORECASE), True),
+]
+
+# Parameter names that, on an AI-classified endpoint, indicate user-controlled
+# text flowing to an LLM. Matched case-insensitively against the parameter
+# name. The caller must require the parent Endpoint to be AI-classified
+# before tagging (otherwise a parameter named "text" on a contact form would
+# be flagged as prompt-injectable, which is meaningless).
+AI_PARAM_NAMES: set[str] = {
+    # ── Confirmed cited names ─────────────────────────────────────────────
+    # OpenAI / Anthropic / Ollama / Cohere / Mistral / TGI chat request body.
+    # Sources per name: developers.openai.com, platform.claude.com/docs/en/api/messages,
+    # github.com/ollama/ollama/blob/main/docs/api.md, docs.cohere.com/reference/chat,
+    # docs.mistral.ai/api, huggingface.co/docs/text-generation-inference/messages_api
+    "messages",
+    "prompt",
+    "system",
+    "input",
+    "instructions",
+
+    # Gemini request body.
+    # Source: ai.google.dev/api/generate-content (`contents`, `systemInstruction`)
+    "contents",
+    "systeminstruction",  # matched lowercase against incoming lowered name
+
+    # HuggingFace Inference text-generation.
+    # Source: huggingface.co/docs/inference-providers/tasks/text-generation
+    "inputs",
+
+    # Ollama /api/generate suffix; Mistral FIM suffix.
+    # Sources: github.com/ollama/ollama/blob/main/docs/api.md, docs.mistral.ai/api/endpoint/fim
+    "suffix",
+
+    # Tool-array field on every modern chat API (OpenAI, Anthropic, Gemini,
+    # Ollama, Cohere, Mistral, TGI — universal naming).
+    "tools",
+
+    # MCP tools/call params.arguments. Source: modelcontextprotocol.io/docs/concepts/tools
+    "arguments",
+
+    # ── Soft-match names (parent endpoint AI-classified guard already gates
+    # these, so they only fire on a known chat / RAG endpoint). Used by
+    # LangServe playground inputs and generic chat clones without a single
+    # vendor cite.
+    "message",
+    "instruction",
+    "query",
+    "question",
+    "text",
+    "query_text",
+    "search_query",
+    "content",
+    "q",
+    # Tool argument carriers used by LangChain / generic tool-call wrappers.
+    "tool_input",
+    "tool_arguments",
+    "function_args",
+}
+
+# Tool-schema dialects. JSON Pointer prefix where each tool's argument
+# properties live. Used by the resolver below — the resolver itself is
+# Phase-15-deferred (no-op until ai_surface_recon discovers an OpenAPI /
+# ai-plugin.json / MCP tools-list spec), but the catalogue ships now so the
+# resolver contract is stable across laps.
+AI_TOOL_ARG_PATH_DIALECTS: list[tuple[str, str]] = [
+    ("openai-functions",  "/parameters/properties"),
+    ("anthropic-tools",   "/input_schema/properties"),
+    ("gemini-functions",  "/parameters/properties"),
+    ("mcp-tools-list",    "/inputSchema/properties"),
+    ("langchain-tool",    "/properties"),
+]
+
+
+# ---------------------------------------------------------------------------
 # Forward-declared stubs (filled by later integration laps)
 # ---------------------------------------------------------------------------
 # These constants are imported by their host modules as soon as the relevant
@@ -391,11 +601,6 @@ AI_FAVICON_HASHES: dict[int, str] = {
 
 # js_recon — AI SDK import regex
 AI_SDK_IMPORT_REGEX: list[tuple[Pattern[str], str, str]] = []
-
-# resource_enum — LLM-flavoured path classifier
-AI_PATH_PATTERNS: dict[str, str] = {}
-AI_RAG_PATH_PATTERNS: list[Pattern[str]] = []
-AI_PARAM_NAMES: set[str] = set()
 
 # subdomain_takeover — AI provider CNAMEs
 AI_TAKEOVER_PROVIDERS: dict[str, str] = {}
@@ -510,3 +715,100 @@ def match_ai_body_fingerprint(body: str) -> tuple[str, str] | None:
         if pattern.search(body):
             return framework, category
     return None
+
+
+# ---------------------------------------------------------------------------
+# resource_enum helpers
+# ---------------------------------------------------------------------------
+
+def match_ai_path(path: str) -> str | None:
+    """Return the ``ai_interface_type`` enum value if the URL path matches
+    a known LLM-shape route, else ``None``.
+
+    Iterates ``AI_PATH_PATTERNS`` in catalogue order (vendor-specific first,
+    generic fallbacks last). Matches on the path component only — query string
+    must be stripped by the caller. Case-insensitive.
+
+    Uses ``re.search`` (not ``re.match``) so patterns anchored with
+    ``(?:^|/)`` correctly fire on suffix positions (e.g. LangServe's
+    ``/agents/foo/stream``). Most patterns are explicitly anchored with
+    ``^``, so search-vs-match makes no behavioural difference there.
+
+    The returned value is one of: ``llm-chat``, ``llm-completion``,
+    ``llm-embedding``, ``llm-tool-call``, ``sse-stream``, ``mcp``,
+    ``llm-graphql``. Callers that want the explicit ``non-llm`` sentinel
+    must substitute it themselves when this helper returns ``None``.
+    """
+    if not path:
+        return None
+    for pattern, interface_type in AI_PATH_PATTERNS:
+        if pattern.search(path):
+            return interface_type
+    return None
+
+
+def is_ai_rag_path(path: str, parent_is_ai: bool = False) -> bool:
+    """True if the URL path looks like a RAG ingestion or retrieval endpoint.
+
+    Some patterns (``/upload``, ``/search``, ``/query``) are too generic to
+    flag standalone — they collide with file-upload and search bars on every
+    e-commerce site. Those patterns carry an ``ambiguous=True`` flag in the
+    catalogue and only fire when ``parent_is_ai`` is True (i.e. the parent
+    BaseURL or Service is already AI-tagged via another signal channel).
+
+    Unambiguous patterns (``/v1/vector_stores``, ``/vectors/upsert``,
+    ``/collections/<name>/points``) fire regardless of ``parent_is_ai``.
+    """
+    if not path:
+        return False
+    for pattern, requires_parent_ai in AI_RAG_PATH_PATTERNS:
+        if pattern.search(path):
+            if requires_parent_ai and not parent_is_ai:
+                continue
+            return True
+    return False
+
+
+def is_ai_prompt_param(name: str) -> bool:
+    """True if a parameter name is a known prompt-injection vector.
+
+    Matches case-insensitively against ``AI_PARAM_NAMES``. The caller is
+    expected to gate this check on the parent Endpoint already being
+    AI-classified (``ai_interface_type IS NOT NULL`` and != ``non-llm``);
+    a parameter named ``text`` on a contact form is not prompt-injectable
+    in any meaningful sense.
+    """
+    if not name:
+        return False
+    return name.strip().lower() in AI_PARAM_NAMES
+
+
+def resolve_ai_tool_arg_path(spec: dict, dialect: str, param_name: str) -> str | None:
+    """Return a JSON Pointer to ``param_name`` inside the tool-schema ``spec``.
+
+    Walks the spec using the JSON Pointer prefix registered in
+    ``AI_TOOL_ARG_PATH_DIALECTS`` for the named dialect. Returns the
+    full pointer (e.g. ``/parameters/properties/query``) on success, or
+    ``None`` if the dialect is unknown, the spec doesn't contain the
+    expected shape, or the parameter is not in the schema.
+
+    This is a placeholder for the Phase-15 ai_surface_recon module — the
+    spec is only populated once that module discovers an OpenAPI /
+    ai-plugin.json / MCP tools/list document. Until then the resolver is
+    effectively a no-op (no spec, no resolution).
+    """
+    if not spec or not dialect or not param_name:
+        return None
+    prefix = next((p for d, p in AI_TOOL_ARG_PATH_DIALECTS if d == dialect), None)
+    if prefix is None:
+        return None
+    # Walk the spec by the prefix components and verify the parameter is
+    # in the resulting properties dict.
+    cursor: dict | None = spec
+    for segment in prefix.strip("/").split("/"):
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(segment)
+    if not isinstance(cursor, dict) or param_name not in cursor:
+        return None
+    return f"{prefix}/{param_name}"

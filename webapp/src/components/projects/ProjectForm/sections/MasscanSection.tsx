@@ -159,7 +159,7 @@ export function MasscanSection({ data, updateField, onRun }: MasscanSectionProps
               <div className={styles.toggleRow}>
                 <div>
                   <span className={styles.toggleLabel}>AI Port Catalog</span>
-                  <p className={styles.toggleDescription}>Annotate AI-bearing ports on masscan output (same catalogue used by Naabu). Emits Technology nodes with <code>category=ai-*</code> linked to the Service.</p>
+                  <p className={styles.toggleDescription}>Annotate AI-bearing ports on masscan output (same catalogue used by Naabu). Emits Technology nodes with category=ai-* linked to the Service.</p>
                 </div>
                 <Toggle
                   checked={data.masscanAiPortCatalogEnabled ?? true}

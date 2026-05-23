@@ -147,7 +147,7 @@ export function NmapSection({ data, updateField, onRun }: NmapSectionProps) {
               <div className={styles.toggleRow}>
                 <div>
                   <span className={styles.toggleLabel}>AI Runtime Version Regex</span>
-                  <p className={styles.toggleDescription}>Regex nmap product/version strings against AI runtimes (Ollama, vLLM, LiteLLM, TGI, Triton, llama.cpp). On match, sets <code>Service.ai_runtime_version</code> so downstream CVE lookups can join against AI library CVE clusters.</p>
+                  <p className={styles.toggleDescription}>Regex nmap product/version strings against AI runtimes (Ollama, vLLM, LiteLLM, TGI, Triton, llama.cpp). On match, sets Service.ai_runtime_version so downstream CVE lookups can join against AI library CVE clusters.</p>
                 </div>
                 <Toggle
                   checked={data.nmapAiVersionRegexEnabled ?? true}

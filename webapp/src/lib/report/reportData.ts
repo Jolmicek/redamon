@@ -108,6 +108,15 @@ export interface SecretRecord {
   keyType: string | null
 }
 
+export interface AiSurfaceRecord {
+  baseUrl: string
+  path: string
+  interfaceType: string             // llm-chat / llm-completion / etc.
+  isRagIngest: boolean
+  promptInjectableParams: string[]  // names of params with is_ai_prompt_injectable=true
+  hasPromptParams: boolean
+}
+
 export interface JsReconFindingRecord {
   findingType: string
   severity: string
@@ -290,6 +299,15 @@ export interface ReportData {
     findings: VhostSniFindingRecord[]
   }
 
+  // AI Surface Recon (Lap-2 — Endpoint AI Classifier)
+  aiSurface: {
+    totalAiEndpoints: number
+    ragIngestEndpoints: number
+    promptInjectableParams: number
+    byInterfaceType: { interfaceType: string; count: number }[]
+    findings: AiSurfaceRecord[]
+  }
+
   // OTX Threat Intelligence
   otx: {
     totalPulses: number
@@ -388,6 +406,7 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
     jsReconData,
     graphqlData,
     vhostSniData,
+    aiSurfaceData,
     otxData,
   ] = await Promise.all([
     withSession(s => queryGraphOverview(s, projectId)),
@@ -400,6 +419,7 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
     withSession(s => queryJsRecon(s, projectId)),
     withSession(s => queryGraphql(s, projectId)),
     withSession(s => queryVhostSni(s, projectId)),
+    withSession(s => queryAiSurface(s, projectId)),
     withSession(s => queryOtx(s, projectId)),
   ])
 
@@ -490,11 +510,20 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
         missingHeaderScore += Math.round((1 - Math.min(coverage, 1)) * 5)
       }
     }
+    // AI surface contribution: AI-tagged endpoints, RAG ingest endpoints,
+    // and prompt-injectable parameters each add a flat weight. Conservative
+    // weights — these are *discovery* findings (a surface exists), not
+    // confirmed vulns. Calibrated to match injectableScore (25/param).
+    const aiSurfaceScore =
+      aiSurfaceData.totalAiEndpoints * 5
+      + aiSurfaceData.ragIngestEndpoints * 15
+      + aiSurfaceData.promptInjectableParams * 25
     const rawRisk = vulnScore + cveScore + gvmExploitScore + kevScore
       + chainExploitScore + chainFindingsScore + capecScore
       + secretsScore + sensitiveFilesScore + injectableScore
       + expiredCertScore + missingHeaderScore
       + trufflehogScore + jsReconScore + graphqlScore + otxScore + vhostSniScore
+      + aiSurfaceScore
     const riskScore = Math.min(100, Math.round(15 * Math.log(rawRisk + 1)))
     const riskLabel: 'Critical' | 'High' | 'Medium' | 'Low' | 'Minimal' =
       riskScore >= 80 ? 'Critical' : riskScore >= 60 ? 'High'
@@ -598,6 +627,7 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
       jsRecon: jsReconData,
       graphqlScan: graphqlData,
       vhostSni: vhostSniData,
+      aiSurface: aiSurfaceData,
       otx: otxData,
       attackChains: attackChainData,
       fireteams: fireteamsBlock,
@@ -1374,6 +1404,74 @@ async function queryVhostSni(session: any, pid: string) {
     })),
   }
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function queryAiSurface(session: any, pid: string) {
+  // Rollup of Endpoint nodes carrying AI annotations from the resource_enum
+  // classifier (lap-2). Excludes 'non-llm' (the explicit "matched nothing"
+  // sentinel) since that would dilute the summary.
+  const rollup = await session.run(
+    `MATCH (e:Endpoint {project_id: $pid})
+     WHERE e.ai_interface_type IS NOT NULL AND e.ai_interface_type <> 'non-llm'
+     RETURN e.ai_interface_type AS interfaceType, count(*) AS count
+     ORDER BY count DESC`,
+    { pid }
+  )
+  const byInterfaceType = rollup.records.map((r: { get(k: string): unknown }) => ({
+    interfaceType: r.get('interfaceType') as string,
+    count: ((r.get('count') as { toNumber?: () => number })?.toNumber?.()) ?? (r.get('count') as number) ?? 0,
+  }))
+  const totalAiEndpoints = byInterfaceType.reduce((s: number, x: { count: number }) => s + x.count, 0)
+
+  const ragRes = await session.run(
+    `MATCH (e:Endpoint {project_id: $pid}) WHERE e.is_ai_rag_ingest = true
+     RETURN count(e) AS n`,
+    { pid }
+  )
+  const ragIngestEndpoints = ((ragRes.records[0]?.get('n') as { toNumber?: () => number })?.toNumber?.()) ?? (ragRes.records[0]?.get('n') as number) ?? 0
+
+  const paramRes = await session.run(
+    `MATCH (p:Parameter {project_id: $pid}) WHERE p.is_ai_prompt_injectable = true
+     RETURN count(p) AS n`,
+    { pid }
+  )
+  const promptInjectableParams = ((paramRes.records[0]?.get('n') as { toNumber?: () => number })?.toNumber?.()) ?? (paramRes.records[0]?.get('n') as number) ?? 0
+
+  // Per-endpoint detail (cap 50)
+  const detail = await session.run(
+    `MATCH (b:BaseURL {project_id: $pid})-[:HAS_ENDPOINT]->(e:Endpoint)
+     WHERE (e.ai_interface_type IS NOT NULL AND e.ai_interface_type <> 'non-llm')
+        OR e.is_ai_rag_ingest = true
+     OPTIONAL MATCH (e)-[:HAS_PARAMETER]->(p:Parameter)
+       WHERE p.is_ai_prompt_injectable = true
+     WITH b, e, collect(DISTINCT p.name) AS promptParams
+     RETURN b.url AS baseUrl, e.path AS path, e.ai_interface_type AS interfaceType,
+            COALESCE(e.is_ai_rag_ingest, false) AS isRagIngest, promptParams
+     ORDER BY interfaceType, baseUrl, path
+     LIMIT 50`,
+    { pid }
+  )
+  const findings: AiSurfaceRecord[] = detail.records.map((r: { get(k: string): unknown }) => {
+    const promptParams = (r.get('promptParams') as string[]) || []
+    return {
+      baseUrl: (r.get('baseUrl') as string) || '',
+      path: (r.get('path') as string) || '/',
+      interfaceType: (r.get('interfaceType') as string) || 'non-llm',
+      isRagIngest: Boolean(r.get('isRagIngest')),
+      promptInjectableParams: promptParams.filter(Boolean),
+      hasPromptParams: promptParams.filter(Boolean).length > 0,
+    }
+  })
+
+  return {
+    totalAiEndpoints,
+    ragIngestEndpoints,
+    promptInjectableParams,
+    byInterfaceType,
+    findings,
+  }
+}
+
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function queryOtx(session: any, pid: string) {

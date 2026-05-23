@@ -49,10 +49,14 @@ model UserLlmProvider {
   maxTokens       Int      @default(16384) @map("max_tokens")
   sslVerify       Boolean  @default(true) @map("ssl_verify")
 
-  // Bedrock only
+  // Bedrock only. Two mutually exclusive auth modes:
+  //   - IAM: awsAccessKeyId + awsSecretKey (legacy SigV4 path)
+  //   - Long-term API key: awsBearerToken (Bearer auth via boto3 >= 1.39)
+  // Backend chooses bearer when awsBearerToken is non-empty, else falls back to IAM.
   awsRegion       String   @default("us-east-1") @map("aws_region")
   awsAccessKeyId  String   @default("") @map("aws_access_key_id")
   awsSecretKey    String   @default("") @map("aws_secret_key")
+  awsBearerToken  String   @default("") @map("aws_bearer_token")
 
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
@@ -403,6 +407,17 @@ model Project {
   vhostSniCustomWordlist           String   @default("") @map("vhost_sni_custom_wordlist") @db.Text
   vhostSniMaxCandidatesPerIp       Int      @default(2000) @map("vhost_sni_max_candidates_per_ip")
 
+  // ========== RESOURCE ENUM AI CLASSIFIER ==========
+  // Cross-cutting AI classifier — runs after Katana/Hakrawler/GAU/FFuf/jsluice/
+  // ParamSpider/Kiterunner/Arjun have produced endpoints. Tags every Endpoint
+  // with ai_interface_type / is_ai_rag_ingest and every Parameter with
+  // is_ai_prompt_injectable / ai_tool_arg_path. Pure regex, no extra traffic.
+  resourceEnumAiClassifierEnabled         Boolean @default(true) @map("resource_enum_ai_classifier_enabled")
+  resourceEnumAiPathClassifierEnabled     Boolean @default(true) @map("resource_enum_ai_path_classifier_enabled")
+  resourceEnumAiRagPathFlagEnabled        Boolean @default(true) @map("resource_enum_ai_rag_path_flag_enabled")
+  resourceEnumAiParamInjectableFlagEnabled Boolean @default(true) @map("resource_enum_ai_param_injectable_flag_enabled")
+  resourceEnumAiToolArgPathEnabled        Boolean @default(true) @map("resource_enum_ai_tool_arg_path_enabled")
+
   // ========== KATANA WEB CRAWLER ==========
   katanaEnabled               Boolean  @default(true) @map("katana_enabled")
   katanaDockerImage           String   @default("projectdiscovery/katana:latest") @map("katana_docker_image")
@@ -438,6 +453,13 @@ model Project {
   jsluiceExtractSecrets       Boolean  @default(true) @map("jsluice_extract_secrets")
   jsluiceConcurrency          Int      @default(5) @map("jsluice_concurrency")
   jsluiceParallelism          Int      @default(5) @map("jsluice_parallelism")
+  jsluiceVerifyUrls           Boolean  @default(true) @map("jsluice_verify_urls")
+  jsluiceVerifyDockerImage    String   @default("projectdiscovery/httpx:latest") @map("jsluice_verify_docker_image")
+  jsluiceVerifyTimeout        Int      @default(5) @map("jsluice_verify_timeout")
+  jsluiceVerifyRateLimit      Int      @default(50) @map("jsluice_verify_rate_limit")
+  jsluiceVerifyThreads        Int      @default(50) @map("jsluice_verify_threads")
+  jsluiceVerifyAcceptStatus   Int[]    @default([200, 201, 301, 302, 307, 308, 401, 403]) @map("jsluice_verify_accept_status")
+  jsluiceExcludePatterns      String[] @default([]) @map("jsluice_exclude_patterns")
 
   // ========== JS RECON SCANNER ==========
   jsReconEnabled              Boolean  @default(false) @map("js_recon_enabled")

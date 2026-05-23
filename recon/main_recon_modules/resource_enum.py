@@ -89,6 +89,125 @@ from recon.helpers.resource_enum import (
 
 
 # =============================================================================
+# AI Surface Recon — endpoint + parameter classifier
+# =============================================================================
+
+# Import via the module (not the names) so monkey-patched catalogues in tests
+# are picked up at call time.
+from recon.helpers import ai_signal_catalog as _ai_catalog
+
+
+def _build_parent_ai_map(recon_data: dict) -> dict[str, bool]:
+    """Return ``{base_url: parent_is_ai}`` derived from http_probe output.
+
+    A BaseURL is considered "parent AI-tagged" when http_probe already
+    stamped ``is_ai_framework_detected = True`` on any Endpoint under it
+    (header / favicon / title / Wappalyzer body fingerprint hit).
+
+    Empty dict when http_probe didn't run — every BaseURL then defaults to
+    parent_is_ai=False, which only suppresses the ambiguous RAG patterns
+    (`/upload`, `/search`, `/query`). Unambiguous patterns (`/rag`,
+    `/vectorize`, `/threads`) still fire.
+    """
+    parent_ai: dict[str, bool] = {}
+    http_probe = recon_data.get("http_probe") or {}
+    by_url = http_probe.get("by_url") or {}
+    for url, entry in by_url.items():
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("is_ai_framework_detected"):
+            continue
+        # Derive base_url = scheme://host:port (drop path).
+        try:
+            p = urlparse(url)
+            base_url = f"{p.scheme}://{p.netloc}"
+        except Exception:
+            continue
+        parent_ai[base_url] = True
+    return parent_ai
+
+
+def _annotate_ai_endpoint_classifier(
+    organized_data: dict, settings: dict | None, recon_data: dict
+) -> dict:
+    """Apply the resource_enum AI classifier in place on ``organized_data``.
+
+    Walks every endpoint and parameter under ``organized_data['by_base_url']``
+    and stamps:
+
+      - ``endpoint['ai_interface_type']`` — one of the 8 enum values, or
+        the explicit ``'non-llm'`` sentinel when no path pattern matched
+      - ``endpoint['is_ai_rag_ingest']`` — True when an unambiguous RAG path
+        matched, or an ambiguous RAG path matched AND the parent BaseURL is
+        already AI-tagged
+      - ``parameter['is_ai_prompt_injectable']`` — True when the parameter
+        name is in the AI_PARAM_NAMES catalogue AND the parent endpoint is
+        AI-classified (ai_interface_type != 'non-llm')
+
+    Each annotation is gated by its own settings toggle plus the master toggle.
+    All toggles default ``True`` so a fresh project picks up annotations with
+    no configuration. Returns a summary dict of counters.
+    """
+    summary = {"paths": 0, "rag_paths": 0, "prompt_params": 0}
+    if settings is None:
+        return summary
+
+    if not settings.get("RESOURCE_ENUM_AI_CLASSIFIER_ENABLED", True):
+        return summary
+
+    path_on = settings.get("RESOURCE_ENUM_AI_PATH_CLASSIFIER_ENABLED", True)
+    rag_on = settings.get("RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED", True)
+    param_on = settings.get("RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED", True)
+    # ai_tool_arg_path resolver is a Phase-15 stub — toggle exists for
+    # forward compatibility but no resolution happens until that lap.
+
+    parent_ai_map = _build_parent_ai_map(recon_data)
+
+    by_base_url = (organized_data or {}).get("by_base_url") or {}
+    for base_url, base_data in by_base_url.items():
+        if not isinstance(base_data, dict):
+            continue
+        parent_is_ai = bool(parent_ai_map.get(base_url, False))
+        for path, endpoint in (base_data.get("endpoints") or {}).items():
+            if not isinstance(endpoint, dict):
+                continue
+
+            # Path classifier: only stamps when the sub-toggle is on AND
+            # something matched. When the sub-toggle is off we leave the
+            # field absent — operators who disabled it don't want sentinels
+            # polluting the graph.
+            if path_on:
+                interface_type = _ai_catalog.match_ai_path(path or "")
+                if interface_type is not None:
+                    endpoint["ai_interface_type"] = interface_type
+                    summary["paths"] += 1
+                else:
+                    endpoint["ai_interface_type"] = "non-llm"
+
+            if rag_on and _ai_catalog.is_ai_rag_path(path or "", parent_is_ai=parent_is_ai):
+                endpoint["is_ai_rag_ingest"] = True
+                summary["rag_paths"] += 1
+
+            endpoint_is_ai = (
+                endpoint.get("ai_interface_type") not in (None, "non-llm")
+                or endpoint.get("is_ai_rag_ingest") is True
+            )
+            if param_on and endpoint_is_ai:
+                params = endpoint.get("parameters") or {}
+                if not isinstance(params, dict):
+                    continue
+                for position in ("query", "body", "path"):
+                    for param in params.get(position) or []:
+                        if not isinstance(param, dict):
+                            continue
+                        name = param.get("name")
+                        if isinstance(name, str) and _ai_catalog.is_ai_prompt_param(name):
+                            param["is_ai_prompt_injectable"] = True
+                            summary["prompt_params"] += 1
+    return summary
+
+
+# =============================================================================
 # Main Function
 # =============================================================================
 
@@ -168,8 +287,12 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             ("JSLUICE_MAX_FILES", "jsluice"),
             ("JSLUICE_PARALLELISM", "jsluice"),
             ("JSLUICE_VERIFY_URLS", "jsluice"),
+            ("JSLUICE_VERIFY_DOCKER_IMAGE", "jsluice"),
+            ("JSLUICE_VERIFY_TIMEOUT", "jsluice"),
             ("JSLUICE_VERIFY_RATE_LIMIT", "jsluice"),
             ("JSLUICE_VERIFY_THREADS", "jsluice"),
+            ("JSLUICE_VERIFY_ACCEPT_STATUS", "jsluice"),
+            ("JSLUICE_EXCLUDE_PATTERNS", "jsluice"),
             ("ARJUN_ENABLED", "Arjun"),
             ("ARJUN_THREADS", "Arjun"),
             ("ARJUN_RATE_LIMIT", "Arjun"),
@@ -724,10 +847,11 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
         "jsluice_skipped_unverified": 0,
     }
 
+    jsluice_urls_pre_verify_count = 0
+
     if JSLUICE_ENABLED and (JSLUICE_EXTRACT_URLS or JSLUICE_EXTRACT_SECRETS):
         all_crawl_urls = list(set(katana_urls + hakrawler_urls))
         if all_crawl_urls:
-            verify_stats = {}
             jsluice_result = run_jsluice_analysis(
                 all_crawl_urls,
                 JSLUICE_MAX_FILES,
@@ -739,6 +863,8 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                 target_domains,
                 use_proxy
             )
+
+            jsluice_urls_pre_verify_count = len(jsluice_result.get("urls", []))
 
             if jsluice_result.get("urls"):
                 if JSLUICE_VERIFY_URLS:
@@ -755,9 +881,9 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                     jsluice_result["urls"] = sorted(verified_jsluice_urls)
                     jsluice_stats.update(verify_stats)
                 else:
-                    jsluice_stats["jsluice_verify_total"] = len(jsluice_result["urls"])
-                    jsluice_stats["jsluice_verify_candidates"] = len(jsluice_result["urls"])
-                    jsluice_stats["jsluice_verified"] = len(jsluice_result["urls"])
+                    jsluice_stats["jsluice_verify_total"] = jsluice_urls_pre_verify_count
+                    jsluice_stats["jsluice_verify_candidates"] = jsluice_urls_pre_verify_count
+                    jsluice_stats["jsluice_verified"] = jsluice_urls_pre_verify_count
 
             if jsluice_result.get("urls"):
                 print("\n[*][jsluice] Merging extracted URLs into results...")
@@ -766,11 +892,11 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                     organized_data['by_base_url'],
                 )
                 jsluice_stats.update(merge_stats)
-                jsluice_stats.update(verify_stats)
                 print(f"[+][jsluice] Total URLs: {jsluice_stats['jsluice_total']}")
                 print(f"[+][jsluice] New endpoints: {jsluice_stats['jsluice_new']}")
                 print(f"[+][jsluice] Overlap: {jsluice_stats['jsluice_overlap']}")
                 if JSLUICE_VERIFY_URLS:
+                    print(f"[+][jsluice] Pre-verify URLs: {jsluice_urls_pre_verify_count}")
                     print(f"[+][jsluice] Skipped (blacklist): {jsluice_stats['jsluice_skipped_blacklist']}")
                     print(f"[+][jsluice] Skipped (unverified): {jsluice_stats['jsluice_skipped_unverified']}")
             elif JSLUICE_VERIFY_URLS and jsluice_stats.get("jsluice_verify_total", 0) > 0:
@@ -1126,6 +1252,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             'jsluice_enabled': JSLUICE_ENABLED,
             'jsluice_max_files': JSLUICE_MAX_FILES if JSLUICE_ENABLED else None,
             'jsluice_verify_enabled': JSLUICE_VERIFY_URLS if JSLUICE_ENABLED else False,
+            'jsluice_urls_pre_verify': jsluice_urls_pre_verify_count if JSLUICE_ENABLED else 0,
             'jsluice_urls_found': len(jsluice_in_scope_urls),
             'jsluice_secrets_found': len(jsluice_result.get("secrets", [])),
             'jsluice_stats': jsluice_stats,
@@ -1239,6 +1366,20 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
         for category, count in base_data['summary']['categories'].items():
             resource_enum_result['summary']['categories'][category] = \
                 resource_enum_result['summary']['categories'].get(category, 0) + count
+
+    # AI Surface Recon — endpoint + parameter classifier.
+    # Annotates every endpoint and parameter in organized_data['by_base_url']
+    # with ai_interface_type / is_ai_rag_ingest / is_ai_prompt_injectable.
+    # Gated by RESOURCE_ENUM_AI_CLASSIFIER_ENABLED (master) plus 4 sub-toggles.
+    ai_summary = _annotate_ai_endpoint_classifier(organized_data, settings, recon_data)
+    resource_enum_result['ai_surface'] = ai_summary
+    if any(ai_summary.values()):
+        print(
+            f"[+][ResourceEnum-AI] AI surface matches \u2014 "
+            f"paths={ai_summary.get('paths', 0)}, "
+            f"rag={ai_summary.get('rag_paths', 0)}, "
+            f"prompt-params={ai_summary.get('prompt_params', 0)}"
+        )
 
     # Add to recon_data
     recon_data['resource_enum'] = resource_enum_result

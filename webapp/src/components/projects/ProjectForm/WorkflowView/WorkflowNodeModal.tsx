@@ -23,6 +23,7 @@ import { GauSection } from '../sections/GauSection'
 import { ParamSpiderSection } from '../sections/ParamSpiderSection'
 import { KiterunnerSection } from '../sections/KiterunnerSection'
 import { ArjunSection } from '../sections/ArjunSection'
+import { ResourceEnumAiSection } from '../sections/ResourceEnumAiSection'
 import { JsReconSection } from '../sections/JsReconSection'
 import { NucleiSection } from '../sections/NucleiSection'
 import { GraphqlScanSection } from '../sections/GraphqlScanSection'
@@ -96,6 +97,7 @@ export function WorkflowNodeModal({
       case 'ParamSpider':       return <ParamSpiderSection {...baseProps} />
       case 'Kiterunner':        return <KiterunnerSection {...baseProps} />
       case 'Arjun':             return <ArjunSection {...baseProps} />
+      case 'EndpointAiClassifier': return <ResourceEnumAiSection {...baseProps} />
       case 'JsRecon':           return <JsReconSection {...extendedProps} />
       case 'Nuclei':            return <NucleiSection {...baseProps} />
       case 'GraphqlScan':       return <GraphqlScanSection {...extendedProps} />

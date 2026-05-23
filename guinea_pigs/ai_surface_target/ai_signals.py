@@ -24,6 +24,10 @@ from __future__ import annotations
 
 HEADER_SHOWROOM_PORT = 9100
 TITLE_SHOWROOM_PORT = 9101
+# Lap-2 — resource_enum AI classifier showroom. Serves an HTML index with
+# links to every catalogued AI path. Katana crawls, builds Endpoint nodes,
+# and the resource_enum AI classifier tags each one.
+ENDPOINT_AI_CLASSIFIER_PORT = 9103
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +256,10 @@ TITLE_VARIANTS: dict[str, dict] = {
 
 def all_ports() -> list[int]:
     """Every TCP port the guinea pig binds. Pass this to naabuCustomPorts."""
-    return [d["port"] for d in PORT_LISTENERS] + [HEADER_SHOWROOM_PORT, TITLE_SHOWROOM_PORT]
+    return (
+        [d["port"] for d in PORT_LISTENERS]
+        + [HEADER_SHOWROOM_PORT, TITLE_SHOWROOM_PORT, ENDPOINT_AI_CLASSIFIER_PORT]
+    )
 
 
 def header_paths() -> list[str]:
@@ -263,3 +270,115 @@ def header_paths() -> list[str]:
 def title_paths() -> list[str]:
     """Every /title/* path the title-showroom serves. Pass this to httpxPaths."""
     return [f"/title/{p}" for p in TITLE_VARIANTS]
+
+
+# ---------------------------------------------------------------------------
+# Lap-2 — resource_enum AI classifier showroom (port 9103)
+# ---------------------------------------------------------------------------
+#
+# One entry per ai_interface_type the resource_enum classifier can stamp.
+# Each entry carries the path Katana should discover plus the enum value the
+# classifier must produce.
+#
+# Each link on the index page also carries query-string params: one or two
+# from AI_PARAM_NAMES (must get `is_ai_prompt_injectable=true`) and one
+# control name like `model`/`temperature` (must NOT get tagged). This lets
+# the e2e check both the positive AND negative paths of the param classifier.
+
+RESOURCE_ENUM_AI_PATHS: list[dict] = [
+    # ── llm-chat ────────────────────────────────────────────────────────
+    {"path": "/v1/chat/completions", "enum": "llm-chat",
+     "prompt_params": ["messages", "system"], "control_params": ["model", "temperature"]},
+    {"path": "/v1/messages", "enum": "llm-chat",
+     "prompt_params": ["messages"], "control_params": ["model"]},
+    {"path": "/api/chat", "enum": "llm-chat",
+     "prompt_params": ["messages"], "control_params": ["stream"]},
+    {"path": "/v1beta/models/gemini-1.5-pro:generateContent", "enum": "llm-chat",
+     "prompt_params": ["contents"], "control_params": ["model"]},
+    {"path": "/v2/chat", "enum": "llm-chat",
+     "prompt_params": ["messages"], "control_params": ["model"]},
+    {"path": "/v1/sonar", "enum": "llm-chat",
+     "prompt_params": ["messages"], "control_params": ["model"]},
+
+    # ── llm-completion ──────────────────────────────────────────────────
+    {"path": "/v1/completions", "enum": "llm-completion",
+     "prompt_params": ["prompt"], "control_params": ["max_tokens"]},
+    {"path": "/v1/fim/completions", "enum": "llm-completion",
+     "prompt_params": ["prompt", "suffix"], "control_params": ["model"]},
+    {"path": "/api/generate", "enum": "llm-completion",
+     "prompt_params": ["prompt", "system"], "control_params": ["model"]},
+
+    # ── llm-embedding ───────────────────────────────────────────────────
+    {"path": "/v1/embeddings", "enum": "llm-embedding",
+     "prompt_params": ["input"], "control_params": ["model"]},
+    {"path": "/api/embed", "enum": "llm-embedding",
+     "prompt_params": ["input"], "control_params": ["model"]},
+    {"path": "/v2/embed", "enum": "llm-embedding",
+     "prompt_params": ["inputs"], "control_params": ["model"]},
+
+    # ── llm-tool-call ───────────────────────────────────────────────────
+    {"path": "/v1/threads/thread_demo/runs", "enum": "llm-tool-call",
+     "prompt_params": ["instructions"], "control_params": ["assistant_id"]},
+    {"path": "/v1/responses/resp_demo/input_items", "enum": "llm-tool-call",
+     "prompt_params": ["input"], "control_params": ["order"]},
+
+    # ── sse-stream ──────────────────────────────────────────────────────
+    {"path": "/generate_stream", "enum": "sse-stream",
+     "prompt_params": ["prompt"], "control_params": ["max_new_tokens"]},
+    {"path": "/agents/demo/stream", "enum": "sse-stream",
+     "prompt_params": ["input"], "control_params": ["config"]},
+
+    # ── mcp ─────────────────────────────────────────────────────────────
+    {"path": "/mcp", "enum": "mcp",
+     "prompt_params": ["arguments"], "control_params": ["method"]},
+    {"path": "/api/mcp", "enum": "mcp",
+     "prompt_params": ["arguments"], "control_params": ["method"]},
+    {"path": "/sse", "enum": "mcp",
+     "prompt_params": [], "control_params": []},
+    {"path": "/tools/list", "enum": "mcp",
+     "prompt_params": [], "control_params": ["cursor"]},
+
+    # ── llm-graphql (gated on parent-AI — fires here because the showroom
+    #    BaseURL is parent-AI-tagged via the http_probe header showroom
+    #    when the e2e driver runs both showrooms on the same host) ──────
+    {"path": "/graphql", "enum": "llm-graphql",
+     "prompt_params": ["query"], "control_params": ["operationName"]},
+]
+
+
+# Unambiguous RAG paths. Each must get is_ai_rag_ingest=true regardless of
+# parent-AI status. Ambiguous RAG paths (/search, /upload, /query) are not
+# included here — they need parent-AI corroboration and are exercised by the
+# http_probe header showroom that tags this same host.
+RESOURCE_ENUM_AI_RAG_PATHS: list[dict] = [
+    {"path": "/v1/files",
+     "prompt_params": [], "control_params": ["purpose"]},
+    {"path": "/v1/uploads",
+     "prompt_params": [], "control_params": ["filename"]},
+    {"path": "/v1/vector_stores",
+     "prompt_params": [], "control_params": ["name"]},
+    {"path": "/v1/vector_stores/vs_demo/search",
+     "prompt_params": ["query"], "control_params": ["max_num_results"]},
+    {"path": "/v1/assistants",
+     "prompt_params": ["instructions"], "control_params": ["model"]},
+    {"path": "/vectors/upsert",
+     "prompt_params": [], "control_params": ["namespace"]},
+    {"path": "/v1/objects",
+     "prompt_params": [], "control_params": ["class"]},
+    {"path": "/collections/demo/points/search",
+     "prompt_params": ["query"], "control_params": ["limit"]},
+]
+
+
+def resource_enum_paths() -> list[str]:
+    """Every classifier-targeted path with its full query string. Pass to
+    httpxPaths so httpx probes them when Katana follows the showroom links."""
+    out: list[str] = []
+    for entry in RESOURCE_ENUM_AI_PATHS + RESOURCE_ENUM_AI_RAG_PATHS:
+        params = entry.get("prompt_params", []) + entry.get("control_params", [])
+        if params:
+            qs = "&".join(f"{p}=demo" for p in params)
+            out.append(f"{entry['path']}?{qs}")
+        else:
+            out.append(entry["path"])
+    return out

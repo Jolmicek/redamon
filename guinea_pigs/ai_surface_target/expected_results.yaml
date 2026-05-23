@@ -20,6 +20,15 @@
 #
 # Counts at the bottom let the driver assert exact-match aggregate totals
 # (catches accidental over- or under-tagging).
+#
+# Lap-2 — resource_enum AI classifier (new section below the original 4 phases).
+#   - endpoint_ai_classifier_paths → 21 Endpoint nodes with ai_interface_type
+#   - endpoint_ai_classifier_rag   → 8 Endpoint nodes with is_ai_rag_ingest=true
+#   - prompt_injectable_params     → Parameter nodes with is_ai_prompt_injectable
+# Driver requirements for the lap-2 section:
+#   - Katana enabled (to discover /v1/* etc. from the showroom HTML index)
+#   - resourceEnumAiClassifierEnabled (default true) — runs after Katana
+#   - The showroom is on port 9103 (added by the new lap-2 wiring)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -246,3 +255,197 @@ counts:
     # NOTE: 'litellm', 'bentoml', 'gradio', 'comfyui', 'streamlit',
     # 'anythingllm' appear in MULTIPLE sources but MERGE to a single
     # Technology node per name (Cypher MERGE semantics).
+
+
+# ─────────────────────────────────────────────────────────────────────
+# jsluice URL verification — additive, independent from AI surface above.
+#
+# Target: port 9102 (make_jsluice_target_app in server.py). Embeds a
+# mixed-signal /static/app.js whose URL strings exercise every branch
+# of the jsluice deny-list + httpx verifier.
+#
+# Project settings the driver MUST set for this section to apply:
+#   katanaEnabled=true, katanaJsCrawl=true, jsluiceEnabled=true,
+#   jsluiceExtractUrls=true, jsluiceVerifyUrls=true
+#
+# Run the same project twice (verify on / verify off) to validate both
+# the new behavior AND the legacy fallback.
+# ─────────────────────────────────────────────────────────────────────
+jsluice_verifier:
+  base_url: http://127.0.0.1:9102
+
+  # With jsluiceVerifyUrls=true the deny-list drops noise BEFORE httpx
+  # probes and httpx drops dead URLs AFTER probing. Only these survive
+  # as Endpoint nodes under the BaseURL.
+  verify_on:
+    endpoints_present:
+      # Regression for B1: .json must survive the .js deny rule.
+      - {path: /api/v1/users.json, status: 200, source: jsluice}
+      - {path: /api/products,      status: 200, source: jsluice}
+      # 403 is in JSLUICE_VERIFY_ACCEPT_STATUS default — counts as "live".
+      - {path: /admin,             status: 403, source: jsluice}
+
+    endpoints_absent:
+      # Dead URL — httpx 404, fail-closed drops it.
+      - /api/deprecated
+      # Library / bundle noise — deny-list drops BEFORE httpx probes.
+      - /node_modules/lodash/index.js
+      - /rxjs/static-5.10
+      # Static asset — .png suffix matches anchored extension rule.
+      - /assets/logo.png
+
+  # With jsluiceVerifyUrls=false the legacy behavior must publish EVERY
+  # jsluice-extracted URL. Use this run to prove the toggle is honored
+  # and that disabling verification has not been accidentally removed.
+  verify_off:
+    endpoints_present:
+      - {path: /api/v1/users.json,             source: jsluice}
+      - {path: /api/products,                  source: jsluice}
+      - {path: /admin,                         source: jsluice}
+      - {path: /api/deprecated,                source: jsluice}
+      - {path: /node_modules/lodash/index.js,  source: jsluice}
+      - {path: /rxjs/static-5.10,              source: jsluice}
+      - {path: /assets/logo.png,               source: jsluice}
+
+  counts:
+    # Six string literals in app.js (USERS_API, two fetch(), three lib/noise)
+    # plus three more fetch() calls = 7 distinct URLs jsluice should extract.
+    jsluice_urls_pre_verify: 7
+    # After deny-list (drops node_modules, rxjs, .png) → 4 candidates.
+    # After httpx (drops /api/deprecated 404) → 3 verified Endpoint nodes.
+    jsluice_verified_endpoints: 3
+    jsluice_skipped_blacklist: 3
+    jsluice_skipped_unverified: 1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Lap-2 — resource_enum AI Classifier (port 9103)
+#
+# Katana crawls the showroom index at http://127.0.0.1:9103/ and follows
+# every link. Each link goes to a catalogued AI path with prompt-named
+# + control-named query params. The resource_enum AI classifier (default
+# on) then tags every Endpoint with ai_interface_type and the prompt
+# params with is_ai_prompt_injectable=true.
+#
+# Project settings the driver MUST set for this section to apply:
+#   katanaEnabled=true (so the index gets crawled and the paths discovered)
+#   resourceEnumAiClassifierEnabled=true (default — runs the classifier)
+#   resourceEnumAiPathClassifierEnabled=true
+#   resourceEnumAiRagPathFlagEnabled=true
+#   resourceEnumAiParamInjectableFlagEnabled=true
+# ─────────────────────────────────────────────────────────────────────
+endpoint_ai_classifier:
+  base_url: http://127.0.0.1:9103
+
+  # ai_interface_type per discovered path. Endpoint nodes under the showroom
+  # BaseURL must carry these values after the classifier runs. Driver asserts
+  # MATCH (e:Endpoint {baseurl: 'http://127.0.0.1:9103', path: <path>})
+  # RETURN e.ai_interface_type
+  paths_by_interface_type:
+    # llm-chat (6)
+    - {path: /v1/chat/completions, enum: llm-chat}
+    - {path: /v1/messages, enum: llm-chat}
+    - {path: /api/chat, enum: llm-chat}
+    - {path: /v1beta/models/gemini-1.5-pro:generateContent, enum: llm-chat}
+    - {path: /v2/chat, enum: llm-chat}
+    - {path: /v1/sonar, enum: llm-chat}
+    # llm-completion (3)
+    - {path: /v1/completions, enum: llm-completion}
+    - {path: /v1/fim/completions, enum: llm-completion}
+    - {path: /api/generate, enum: llm-completion}
+    # llm-embedding (3)
+    - {path: /v1/embeddings, enum: llm-embedding}
+    - {path: /api/embed, enum: llm-embedding}
+    - {path: /v2/embed, enum: llm-embedding}
+    # llm-tool-call (2)
+    - {path: /v1/threads/thread_demo/runs, enum: llm-tool-call}
+    - {path: /v1/responses/resp_demo/input_items, enum: llm-tool-call}
+    # sse-stream (2)
+    - {path: /generate_stream, enum: sse-stream}
+    - {path: /agents/demo/stream, enum: sse-stream}
+    # mcp (4)
+    - {path: /mcp, enum: mcp}
+    - {path: /api/mcp, enum: mcp}
+    - {path: /sse, enum: mcp}
+    - {path: /tools/list, enum: mcp}
+    # llm-graphql (1) — only fires here because parent BaseURL would need to
+    # be AI-tagged for the gate, BUT my catalogue actually fires
+    # /graphql unconditionally (only the AMBIGUOUS RAG patterns like /search
+    # need parent-AI). Path classifier has no parent-AI gate. Fires.
+    - {path: /graphql, enum: llm-graphql}
+
+  # is_ai_rag_ingest=true on these (unambiguous catalogue entries — fire
+  # regardless of parent-AI status)
+  rag_endpoints:
+    - /v1/files
+    - /v1/uploads
+    - /v1/vector_stores
+    - /v1/vector_stores/vs_demo/search
+    - /v1/assistants
+    - /vectors/upsert
+    - /v1/objects
+    - /collections/demo/points/search
+
+  # Parameter nodes that MUST carry is_ai_prompt_injectable=true.
+  # The classifier only fires on AI-classified parent endpoints — control
+  # params on the same endpoints (model / temperature / max_tokens / etc.)
+  # must NOT be flagged. The driver asserts both positive and negative.
+  prompt_injectable_params:
+    - {endpoint_path: /v1/chat/completions,             param: messages}
+    - {endpoint_path: /v1/chat/completions,             param: system}
+    - {endpoint_path: /v1/messages,                     param: messages}
+    - {endpoint_path: /api/chat,                        param: messages}
+    - {endpoint_path: /v1beta/models/gemini-1.5-pro:generateContent, param: contents}
+    - {endpoint_path: /v2/chat,                         param: messages}
+    - {endpoint_path: /v1/sonar,                        param: messages}
+    - {endpoint_path: /v1/completions,                  param: prompt}
+    - {endpoint_path: /v1/fim/completions,              param: prompt}
+    - {endpoint_path: /v1/fim/completions,              param: suffix}
+    - {endpoint_path: /api/generate,                    param: prompt}
+    - {endpoint_path: /api/generate,                    param: system}
+    - {endpoint_path: /v1/embeddings,                   param: input}
+    - {endpoint_path: /api/embed,                       param: input}
+    - {endpoint_path: /v2/embed,                        param: inputs}
+    - {endpoint_path: /v1/threads/thread_demo/runs,     param: instructions}
+    - {endpoint_path: /v1/responses/resp_demo/input_items, param: input}
+    - {endpoint_path: /generate_stream,                 param: prompt}
+    - {endpoint_path: /agents/demo/stream,              param: input}
+    - {endpoint_path: /mcp,                             param: arguments}
+    - {endpoint_path: /api/mcp,                         param: arguments}
+    - {endpoint_path: /graphql,                         param: query}
+    - {endpoint_path: /v1/vector_stores/vs_demo/search, param: query}
+    - {endpoint_path: /v1/assistants,                   param: instructions}
+    - {endpoint_path: /collections/demo/points/search,  param: query}
+
+  # Negative — these param names on the SAME endpoints must NOT be flagged.
+  control_params_not_flagged:
+    - {endpoint_path: /v1/chat/completions,  param: model}
+    - {endpoint_path: /v1/chat/completions,  param: temperature}
+    - {endpoint_path: /v1/completions,       param: max_tokens}
+    - {endpoint_path: /v1/embeddings,        param: model}
+    - {endpoint_path: /v1/threads/thread_demo/runs, param: assistant_id}
+    - {endpoint_path: /generate_stream,      param: max_new_tokens}
+    - {endpoint_path: /mcp,                  param: method}
+    - {endpoint_path: /graphql,              param: operationName}
+
+  counts:
+    # 21 paths from RESOURCE_ENUM_AI_PATHS — one Endpoint each.
+    endpoints_with_ai_interface_type: 21
+    # 8 unambiguous RAG paths — Endpoint.is_ai_rag_ingest=true on each.
+    endpoints_with_is_ai_rag_ingest: 8
+    # 25 prompt-injectable params across the 21 endpoints (some endpoints
+    # have 2 prompt params, hence the count > endpoint count).
+    parameters_with_is_ai_prompt_injectable: 25
+    # Endpoints by enum (rollup) — must match exactly.
+    by_interface_type:
+      llm-chat: 6
+      llm-completion: 3
+      llm-embedding: 3
+      llm-tool-call: 2
+      sse-stream: 2
+      mcp: 4
+      llm-graphql: 1
+    # The base URL gets exactly one BaseURL node with HAS_ENDPOINT into 21+8=29
+    # Endpoints (one per unique path). The classifier doesn't create new nodes
+    # — it only enriches existing Endpoint + Parameter rows.
+    base_url_count: 1

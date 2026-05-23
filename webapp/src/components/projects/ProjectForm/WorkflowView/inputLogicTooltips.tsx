@@ -582,6 +582,33 @@ const Arjun = (
   </div>
 )
 
+const EndpointAiClassifier = (
+  <div style={wrapperStyle}>
+    <div style={firstSectionTitleStyle}>How input is generated</div>
+    <p style={paraStyle}>
+      Reads every Endpoint, Parameter and BaseURL already in the graph. No URL is fetched and no probe is sent to the target. The classifier is pure pattern matching over data the rest of the resource enumeration step has already collected.
+    </p>
+    <ul style={listStyle}>
+      <li><strong>Endpoint paths</strong> are matched against a catalogue of vendor-specific LLM routes (OpenAI <span style={codeStyle}>/v1/chat/completions</span>, Anthropic <span style={codeStyle}>/v1/messages</span>, Ollama <span style={codeStyle}>/api/chat</span>, Gemini <span style={codeStyle}>:generateContent</span>, Cohere <span style={codeStyle}>/v2/chat</span>, MCP <span style={codeStyle}>/mcp</span>, LangServe <span style={codeStyle}>/stream</span>, and similar) plus RAG ingestion / retrieval paths (OpenAI Vector Stores, Pinecone <span style={codeStyle}>/vectors/upsert</span>, Weaviate <span style={codeStyle}>/v1/objects</span>, Qdrant <span style={codeStyle}>/collections/.../points</span>).</li>
+      <li><strong>Parent BaseURL</strong> is checked first. Ambiguous paths like <span style={codeStyle}>/search</span>, <span style={codeStyle}>/upload</span> and <span style={codeStyle}>/query</span> only count as RAG when their host already has an AI framework tag from the HTTP probing step, to avoid flagging every e-commerce search bar.</li>
+      <li><strong>Parameter names</strong> are matched against a catalogue of prompt-injection field names (<span style={codeStyle}>prompt</span>, <span style={codeStyle}>messages</span>, <span style={codeStyle}>system</span>, <span style={codeStyle}>contents</span>, <span style={codeStyle}>inputs</span>, <span style={codeStyle}>arguments</span>, and similar) only when the parent endpoint is AI-classified.</li>
+    </ul>
+
+    <div style={sectionTitleStyle}>How output transforms the graph</div>
+    <ul style={listStyle}>
+      <li><strong>Endpoint</strong> gets <span style={codeStyle}>ai_interface_type</span> set to one of <span style={codeStyle}>llm-chat</span>, <span style={codeStyle}>llm-completion</span>, <span style={codeStyle}>llm-embedding</span>, <span style={codeStyle}>llm-tool-call</span>, <span style={codeStyle}>sse-stream</span>, <span style={codeStyle}>mcp</span>, <span style={codeStyle}>llm-graphql</span>, or <span style={codeStyle}>non-llm</span>.</li>
+      <li>Endpoints recognized as RAG also get <span style={codeStyle}>is_ai_rag_ingest=true</span>.</li>
+      <li><strong>Parameter</strong> nodes on AI-classified endpoints get <span style={codeStyle}>is_ai_prompt_injectable=true</span> when their name matches the catalogue.</li>
+      <li>No new nodes and no new relationships are created. Existing Endpoint and Parameter rows are enriched in place.</li>
+    </ul>
+
+    <div style={sectionTitleStyle}>When the scan refuses to start</div>
+    <p style={{ ...paraStyle, margin: 0 }}>
+      Only when the graph contains zero Endpoint nodes. The classifier has nothing to do when the URL discovery tools (Katana, Hakrawler, GAU, FFuf, ParamSpider, Arjun, Kiterunner, jsluice) have not produced any endpoints yet.
+    </p>
+  </div>
+)
+
 // ============================================================================
 // VULNERABILITY / EXPLOITATION
 // ============================================================================
@@ -849,6 +876,7 @@ export const INPUT_LOGIC_TOOLTIPS: Record<string, ReactNode> = {
   Jsluice,
   JsRecon,
   Arjun,
+  EndpointAiClassifier,
   // Vulnerability / exploitation
   Nuclei,
   GraphqlScan,

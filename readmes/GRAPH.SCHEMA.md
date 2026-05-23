@@ -2838,6 +2838,10 @@ RETURN labels(n) AS label, count(*) AS n
 | `Endpoint` | `is_ai_framework_detected` | bool | `http_probe` (any of: header match, favicon hash hit, title regex hit) |
 | `Endpoint` | `ai_framework_name` | string (e.g. `"langchain"`, `"vllm"`, `"litellm"`) | `http_probe` (header signature winner) |
 | `Endpoint` | `ai_frontend_product_guess` | string (e.g. `"open-webui"`, `"flowise"`, `"gradio"`) | `http_probe` (favicon hash or title regex; favicon wins) |
+| `Endpoint` | `ai_interface_type` | enum (`"llm-chat"`, `"llm-completion"`, `"llm-embedding"`, `"llm-tool-call"`, `"sse-stream"`, `"mcp"`, `"llm-graphql"`, `"non-llm"`) | `resource_enum` (path regex against `AI_PATH_PATTERNS`) |
+| `Endpoint` | `is_ai_rag_ingest` | bool | `resource_enum` (path regex against `AI_RAG_PATH_PATTERNS`; ambiguous paths gated on parent BaseURL being AI-tagged) |
+| `Parameter` | `is_ai_prompt_injectable` | bool | `resource_enum` (name in `AI_PARAM_NAMES` AND parent Endpoint AI-classified) |
+| `Parameter` | `ai_tool_arg_path` | string (JSON Pointer e.g. `"/parameters/properties/query"`) | reserved for central `ai_surface_recon` module — resolves against discovered OpenAPI / `ai-plugin.json` / MCP `tools/list` specs |
 
 > **Patch D model split (May 2026)**: AI annotations now live on `Endpoint` rather than `BaseURL`. `BaseURL` was redefined as host-level (`scheme://host:port`) — one per HTTP service — and `Endpoint` carries each probed path's status/headers/title/AI signals. Endpoints reach their parent via `(BaseURL)-[:HAS_ENDPOINT]->(Endpoint)`, or directly via `Endpoint.baseurl` property. The `USES_TECHNOLOGY` edge from `http_probe` also moved to `Endpoint`.
 
@@ -2884,9 +2888,7 @@ Documented here so the prefix convention stays coherent as later laps land. Empt
 
 | Node label | Reserved property | Lap |
 |---|---|---|
-| `Endpoint` | `ai_interface_type` (`llm-chat`, `llm-completion`, `llm-tool-call`, `llm-embedding`, `sse-stream`, `mcp`, `llm-graphql`) | resource_enum lap |
-| `Endpoint` | `is_ai_rag_ingest`, `ai_tool_schema_ref`, `ai_supports_streaming`, `ai_supports_tools`, `ai_supports_vision`, `ai_model_family_guess`, `ai_latency_p50_ms` | resource_enum / central ai_surface_recon lap |
-| `Parameter` | `is_ai_prompt_injectable`, `ai_tool_arg_path` | resource_enum lap |
+| `Endpoint` | `ai_tool_schema_ref`, `ai_supports_streaming`, `ai_supports_tools`, `ai_supports_vision`, `ai_model_family_guess`, `ai_latency_p50_ms` | central ai_surface_recon lap |
 | `Vulnerability` | `ai_owasp_llm_id`, `ai_atlas_technique`, `ai_asr`, `ai_trials`, `ai_oracle_kind`, `ai_payload_class`, `ai_transcript_ref` | vuln_scan / ai_guardrail_probe lap |
 | `CVE` | `is_ai_library` | vuln_scan AI library lookup lap |
 | `Secret` / `TrufflehogFinding` / `GithubSecret` | `ai_provider` | trufflehog / github-secret-hunt AI detector lap |

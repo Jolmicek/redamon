@@ -23,12 +23,20 @@ import sys
 from aiohttp import web
 
 from ai_signals import (
+    ENDPOINT_AI_CLASSIFIER_PORT,
     HEADER_SHOWROOM_PORT,
     HEADER_VARIANTS,
     PORT_LISTENERS,
+    RESOURCE_ENUM_AI_PATHS,
+    RESOURCE_ENUM_AI_RAG_PATHS,
     TITLE_SHOWROOM_PORT,
     TITLE_VARIANTS,
 )
+
+
+# Port for the jsluice URL-verification end-to-end target. Independent of the
+# AI surface ports above so the AI lap-1 catalog tests stay untouched.
+JSLUICE_TARGET_PORT = 9102
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +210,178 @@ def make_title_showroom_app() -> web.Application:
 
 
 # ---------------------------------------------------------------------------
+# jsluice URL-verification target (port 9102)
+#
+# Serves a tiny HTML entry point that links to an application JS file. The JS
+# file embeds a deliberately mixed bag of URL strings that exercise every
+# branch of the jsluice deny-list + httpx verifier:
+#
+#   live  + .json  → /api/v1/users.json   (proves B1: .json survives .js rule)
+#   live  + path   → /api/products
+#   live  + 403    → /admin                (proves accept_status default 403)
+#   dead  + 404    → /api/deprecated       (proves fail-closed for dead URL)
+#   noise + lib    → /node_modules/...     (deny-list drops before httpx)
+#   noise + lib    → /rxjs/static-5.10     (deny-list drops before httpx)
+#   noise + asset  → /assets/logo.png      (deny-list drops before httpx)
+#
+# Noise paths are intentionally NOT served — if the deny-list ever stops
+# filtering them, httpx would 404 the path and they still wouldn't reach the
+# graph. The deny-list is the guard we care about.
+# ---------------------------------------------------------------------------
+
+JSLUICE_APP_JS = b"""
+// Mixed-signal JS for end-to-end jsluice verification testing.
+// Each fetch / string literal below should exercise a specific branch of the
+// jsluice deny-list + httpx verifier.
+
+const USERS_API = '/api/v1/users.json';      // live + .json (B1 regression)
+fetch('/api/products');                       // live + path
+fetch('/admin');                              // live + 403 (accept_status)
+fetch('/api/deprecated');                    // dead + 404 (fail-closed)
+
+// Noise that the deny-list MUST drop before httpx ever probes it.
+const LIB    = '/node_modules/lodash/index.js';
+const BUNDLE = '/rxjs/static-5.10';
+const LOGO   = '/assets/logo.png';
+
+export { USERS_API, LIB, BUNDLE, LOGO };
+"""
+
+
+def make_endpoint_ai_classifier_app() -> web.Application:
+    """Lap-2 — resource_enum AI classifier showroom.
+
+    Serves an HTML index linking to every catalogued AI path. Each link
+    carries query-string params (some prompt-injectable, some control) so
+    Katana picks them up as Endpoint + Parameter nodes. The resource_enum
+    AI classifier then tags each endpoint with `ai_interface_type` /
+    `is_ai_rag_ingest` and each prompt-named param with
+    `is_ai_prompt_injectable=true`.
+
+    Every linked URL serves a trivial 200 OK — the goal is discovery, not
+    realism. The classifier reads from the graph, not from the response.
+    """
+    app = web.Application()
+
+    all_entries = RESOURCE_ENUM_AI_PATHS + RESOURCE_ENUM_AI_RAG_PATHS
+
+    def _qs(entry: dict) -> str:
+        params = entry.get("prompt_params", []) + entry.get("control_params", [])
+        return "&".join(f"{p}=demo" for p in params)
+
+    async def index(_request: web.Request) -> web.Response:
+        rows = []
+        for entry in RESOURCE_ENUM_AI_PATHS:
+            params = entry.get("prompt_params", []) + entry.get("control_params", [])
+            href = entry["path"] + (("?" + _qs(entry)) if params else "")
+            rows.append(
+                f"  <li><a href='{href}'>{entry['path']}</a> &mdash; "
+                f"<code>{entry['enum']}</code>"
+                + (f" (params: {', '.join(params)})" if params else "")
+                + "</li>"
+            )
+        rag_rows = []
+        for entry in RESOURCE_ENUM_AI_RAG_PATHS:
+            params = entry.get("prompt_params", []) + entry.get("control_params", [])
+            href = entry["path"] + (("?" + _qs(entry)) if params else "")
+            rag_rows.append(
+                f"  <li><a href='{href}'>{entry['path']}</a> &mdash; RAG"
+                + (f" (params: {', '.join(params)})" if params else "")
+                + "</li>"
+            )
+        body = (
+            "<!DOCTYPE html><html><head>"
+            "<title>RedAmon Endpoint AI Classifier Showroom</title>"
+            "</head><body>"
+            "<h1>Endpoint AI Classifier Showroom</h1>"
+            "<p>Katana discovers these links. The resource_enum AI classifier "
+            "stamps <code>Endpoint.ai_interface_type</code> and "
+            "<code>is_ai_rag_ingest</code> based on path; "
+            "<code>Parameter.is_ai_prompt_injectable=true</code> on the prompt-named params.</p>"
+            f"<h2>AI Interface Type paths ({len(RESOURCE_ENUM_AI_PATHS)})</h2>"
+            "<ul>\n" + "\n".join(rows) + "\n</ul>"
+            f"<h2>RAG ingestion / retrieval paths ({len(RESOURCE_ENUM_AI_RAG_PATHS)})</h2>"
+            "<ul>\n" + "\n".join(rag_rows) + "\n</ul>"
+            "</body></html>"
+        )
+        return web.Response(text=body, content_type="text/html")
+
+    async def catch_all(request: web.Request) -> web.Response:
+        # Echo the path and parsed query string. 200 OK is enough — the
+        # classifier reads from the graph, not from the response body.
+        path = request.path
+        return web.Response(
+            text=f"OK — guinea pig endpoint: {path}\nquery: {dict(request.query)}\n",
+            content_type="text/plain",
+        )
+
+    async def favicon(_r: web.Request) -> web.Response:
+        return _empty_favicon()
+
+    async def healthz(_r: web.Request) -> web.Response:
+        return web.Response(text="ok", content_type="text/plain")
+
+    app.router.add_get("/", index)
+    app.router.add_get("/favicon.ico", favicon)
+    app.router.add_get("/healthz", healthz)
+    # Register every catalogued path as a no-op 200 OK.
+    seen: set[str] = set()
+    for entry in all_entries:
+        p = entry["path"]
+        if p in seen:
+            continue
+        seen.add(p)
+        app.router.add_get(p, catch_all)
+    return app
+
+
+def make_jsluice_target_app() -> web.Application:
+    app = web.Application()
+
+    async def index(_r: web.Request) -> web.Response:
+        body = (
+            "<!DOCTYPE html><html><head>"
+            "<title>RedAmon jsluice verifier target</title>"
+            "<script src='/static/app.js'></script>"
+            "</head><body><h1>jsluice target</h1>"
+            "<p>Katana follows the script tag; jsluice extracts the URLs.</p>"
+            "</body></html>"
+        )
+        return web.Response(text=body, content_type="text/html")
+
+    async def app_js(_r: web.Request) -> web.Response:
+        return web.Response(body=JSLUICE_APP_JS, content_type="application/javascript")
+
+    async def users_json(_r: web.Request) -> web.Response:
+        return web.json_response({"users": []})
+
+    async def products(_r: web.Request) -> web.Response:
+        return web.json_response({"products": []})
+
+    async def admin(_r: web.Request) -> web.Response:
+        return web.Response(text="forbidden", status=403)
+
+    async def deprecated(_r: web.Request) -> web.Response:
+        return web.Response(text="gone", status=404)
+
+    async def favicon(_r: web.Request) -> web.Response:
+        return _empty_favicon()
+
+    async def healthz(_r: web.Request) -> web.Response:
+        return web.Response(text="ok", content_type="text/plain")
+
+    app.router.add_get("/", index)
+    app.router.add_get("/static/app.js", app_js)
+    app.router.add_get("/api/v1/users.json", users_json)
+    app.router.add_get("/api/products", products)
+    app.router.add_get("/admin", admin)
+    app.router.add_get("/api/deprecated", deprecated)
+    app.router.add_get("/favicon.ico", favicon)
+    app.router.add_get("/healthz", healthz)
+    return app
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -246,6 +426,26 @@ async def main() -> None:
             make_title_showroom_app(),
             TITLE_SHOWROOM_PORT,
             f"title  showroom — {len(TITLE_VARIANTS)} variants on /title/<product>",
+        )
+    )
+
+    # 4. jsluice URL-verification target (additive — does not affect AI surface tests)
+    runners.append(
+        await _start_site(
+            make_jsluice_target_app(),
+            JSLUICE_TARGET_PORT,
+            "jsluice verifier target — /static/app.js with mixed live/dead/noise URLs",
+        )
+    )
+
+    # 5. Lap-2 — resource_enum AI classifier showroom
+    runners.append(
+        await _start_site(
+            make_endpoint_ai_classifier_app(),
+            ENDPOINT_AI_CLASSIFIER_PORT,
+            f"endpoint-ai-classifier showroom — "
+            f"{len(RESOURCE_ENUM_AI_PATHS)} interface-type paths + "
+            f"{len(RESOURCE_ENUM_AI_RAG_PATHS)} RAG paths",
         )
     )
 

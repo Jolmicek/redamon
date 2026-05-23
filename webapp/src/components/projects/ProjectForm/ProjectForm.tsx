@@ -30,6 +30,7 @@ import { HttpxSection } from './sections/HttpxSection'
 import { NucleiSection } from './sections/NucleiSection'
 import { KatanaSection } from './sections/KatanaSection'
 import { HakrawlerSection } from './sections/HakrawlerSection'
+import { ResourceEnumAiSection } from './sections/ResourceEnumAiSection'
 import { JsluiceSection } from './sections/JsluiceSection'
 import { FfufSection } from './sections/FfufSection'
 import { GauSection } from './sections/GauSection'
@@ -750,6 +751,7 @@ export function ProjectForm({
             <ParamSpiderSection data={formData} updateField={updateField} onRun={mode === 'edit' && projectId ? () => setPartialReconToolId('ParamSpider') : undefined} />
             <KiterunnerSection data={formData} updateField={updateField} onRun={mode === 'edit' && projectId ? () => setPartialReconToolId('Kiterunner') : undefined} />
             <ArjunSection data={formData} updateField={updateField} onRun={mode === 'edit' && projectId ? () => setPartialReconToolId('Arjun') : undefined} />
+            <ResourceEnumAiSection data={formData} updateField={updateField} onRun={mode === 'edit' && projectId ? () => setPartialReconToolId('EndpointAiClassifier') : undefined} />
           </>
         )}
 

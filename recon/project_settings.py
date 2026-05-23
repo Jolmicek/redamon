@@ -236,6 +236,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'VHOST_SNI_CUSTOM_WORDLIST': '',
     'VHOST_SNI_MAX_CANDIDATES_PER_IP': 2000,
 
+    # Resource Enum AI Classifier — cross-cutting endpoint + parameter
+    # classifier that runs after Katana/Hakrawler/GAU/FFuf/jsluice/ParamSpider/
+    # Kiterunner/Arjun have produced endpoints. Pure regex, no extra traffic.
+    'RESOURCE_ENUM_AI_CLASSIFIER_ENABLED': True,
+    'RESOURCE_ENUM_AI_PATH_CLASSIFIER_ENABLED': True,
+    'RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED': True,
+    'RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED': True,
+    'RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED': True,
+
     # Katana Web Crawler
     'KATANA_ENABLED': True,
     'KATANA_DOCKER_IMAGE': 'projectdiscovery/katana:latest',
@@ -890,6 +899,13 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['VHOST_SNI_CUSTOM_WORDLIST'] = project.get('vhostSniCustomWordlist', DEFAULT_SETTINGS['VHOST_SNI_CUSTOM_WORDLIST'])
     settings['VHOST_SNI_MAX_CANDIDATES_PER_IP'] = project.get('vhostSniMaxCandidatesPerIp', DEFAULT_SETTINGS['VHOST_SNI_MAX_CANDIDATES_PER_IP'])
 
+    # Resource Enum AI Classifier
+    settings['RESOURCE_ENUM_AI_CLASSIFIER_ENABLED'] = project.get('resourceEnumAiClassifierEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_CLASSIFIER_ENABLED'])
+    settings['RESOURCE_ENUM_AI_PATH_CLASSIFIER_ENABLED'] = project.get('resourceEnumAiPathClassifierEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_PATH_CLASSIFIER_ENABLED'])
+    settings['RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED'] = project.get('resourceEnumAiRagPathFlagEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED'])
+    settings['RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED'] = project.get('resourceEnumAiParamInjectableFlagEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED'])
+    settings['RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED'] = project.get('resourceEnumAiToolArgPathEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED'])
+
     # Katana Web Crawler
     settings['KATANA_ENABLED'] = project.get('katanaEnabled', DEFAULT_SETTINGS['KATANA_ENABLED'])
     settings['KATANA_DOCKER_IMAGE'] = project.get('katanaDockerImage', DEFAULT_SETTINGS['KATANA_DOCKER_IMAGE'])
@@ -929,8 +945,11 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['JSLUICE_VERIFY_TIMEOUT'] = project.get('jsluiceVerifyTimeout', DEFAULT_SETTINGS['JSLUICE_VERIFY_TIMEOUT'])
     settings['JSLUICE_VERIFY_RATE_LIMIT'] = project.get('jsluiceVerifyRateLimit', DEFAULT_SETTINGS['JSLUICE_VERIFY_RATE_LIMIT'])
     settings['JSLUICE_VERIFY_THREADS'] = project.get('jsluiceVerifyThreads', DEFAULT_SETTINGS['JSLUICE_VERIFY_THREADS'])
-    settings['JSLUICE_VERIFY_ACCEPT_STATUS'] = project.get('jsluiceVerifyAcceptStatus', DEFAULT_SETTINGS['JSLUICE_VERIFY_ACCEPT_STATUS'])
-    settings['JSLUICE_EXCLUDE_PATTERNS'] = project.get('jsluiceExcludePatterns', DEFAULT_SETTINGS['JSLUICE_EXCLUDE_PATTERNS'])
+    # Treat empty arrays as "use defaults" so DB rows defaulted to [] don't silently disable filtering/status acceptance.
+    accept_status = project.get('jsluiceVerifyAcceptStatus') or DEFAULT_SETTINGS['JSLUICE_VERIFY_ACCEPT_STATUS']
+    settings['JSLUICE_VERIFY_ACCEPT_STATUS'] = accept_status
+    exclude_patterns = project.get('jsluiceExcludePatterns') or DEFAULT_SETTINGS['JSLUICE_EXCLUDE_PATTERNS']
+    settings['JSLUICE_EXCLUDE_PATTERNS'] = exclude_patterns
 
     # JS Recon Scanner
     settings['JS_RECON_ENABLED'] = project.get('jsReconEnabled', DEFAULT_SETTINGS['JS_RECON_ENABLED'])

@@ -182,11 +182,16 @@ def test_ai_favicon_hashes_shape():
 
 def test_forward_stubs_have_correct_types_even_when_empty():
     """Later-lap stubs must be present with the right container type so
-    distributed hooks landing in those laps can import without crashing."""
+    distributed hooks landing in those laps can import without crashing.
+
+    Note: AI_PATH_PATTERNS is now a list of (regex, ai_interface_type) tuples
+    (was a forward-declared empty dict; shipped with the resource_enum lap).
+    AI_RAG_PATH_PATTERNS likewise carries (regex, requires_parent_ai) tuples."""
     assert isinstance(cat.AI_SDK_IMPORT_REGEX, list)
-    assert isinstance(cat.AI_PATH_PATTERNS, dict)
+    assert isinstance(cat.AI_PATH_PATTERNS, list)
     assert isinstance(cat.AI_RAG_PATH_PATTERNS, list)
     assert isinstance(cat.AI_PARAM_NAMES, set)
+    assert isinstance(cat.AI_TOOL_ARG_PATH_DIALECTS, list)
     assert isinstance(cat.AI_TAKEOVER_PROVIDERS, dict)
     assert isinstance(cat.AI_VHOST_WORDLIST, list)
     assert isinstance(cat.AI_CVE_LIBRARIES, list)

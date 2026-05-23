@@ -34,6 +34,28 @@ DEFAULT_JSLUICE_EXCLUDE_PATTERNS = [
 ]
 
 
+def _split_exclude_patterns(exclude_patterns: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Split deny-list patterns into (extension suffixes, substring patterns).
+
+    Extensions are matched against the path suffix only (e.g. `.js` matches
+    `/app/main.js` but not `/api/users.json`). Everything else uses substring
+    match against the URL path + query.
+    """
+    extensions = []
+    substrings = []
+    for raw in exclude_patterns:
+        if not raw:
+            continue
+        pat = raw.lower()
+        # An extension pattern starts with '.' and contains no slash.
+        if pat.startswith('.') and '/' not in pat:
+            extensions.append(pat)
+        else:
+            substrings.append(pat)
+    return extensions, substrings
+
+
 def _create_temp_dir(prefix: str = "jsluice_verify") -> Path:
     """Create a temp directory under /tmp/redamon for Docker-in-Docker compatibility."""
     temp_dir = Path(f"/tmp/redamon/.{prefix}_{uuid.uuid4().hex[:8]}")
@@ -62,16 +84,21 @@ def filter_jsluice_url(url: str, exclude_patterns: List[str]) -> bool:
         return False
 
     try:
-        url_lower = url.lower()
         parsed = urlparse(url)
         path_lower = (parsed.path or "").lower()
         query_lower = (parsed.query or "").lower()
-        haystack = f"{url_lower} {path_lower} {query_lower}"
+        haystack = f"{path_lower} {query_lower}"
 
-        return not any(
-            pattern and pattern.lower() in haystack
-            for pattern in exclude_patterns
-        )
+        extensions, substrings = _split_exclude_patterns(exclude_patterns)
+
+        # Extensions match the path suffix only — `.js` must not drop `.json`.
+        if any(path_lower.endswith(ext) for ext in extensions):
+            return False
+
+        if any(sub in haystack for sub in substrings):
+            return False
+
+        return True
     except Exception:
         return False
 
@@ -130,8 +157,11 @@ def verify_jsluice_urls(
             for url in candidates:
                 f.write(f"{url}\n")
 
+        # --net=host is ALWAYS passed so the httpx verifier can reach loopback /
+        # local-lab targets. See recon/helpers/resource_enum/katana_helpers.py
+        # for the long comment on sibling-container network isolation.
         cmd = [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "--net=host",
             "-v", f"{temp_dir}:/data",
             docker_image,
             "-l", "/data/urls.txt",
@@ -148,13 +178,22 @@ def verify_jsluice_urls(
             cmd.extend(["-proxy", "socks5://127.0.0.1:9050"])
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
             print("[!][jsluice] URL verification timeout; dropping unverified jsluice URLs")
             stats["jsluice_skipped_unverified"] = len(candidates)
             return set(), stats
         except Exception as e:
             print(f"[!][jsluice] URL verification error: {e}; dropping unverified jsluice URLs")
+            stats["jsluice_skipped_unverified"] = len(candidates)
+            return set(), stats
+
+        if proc.returncode != 0:
+            stderr_tail = (proc.stderr or "").strip().splitlines()[-3:]
+            print(
+                f"[!][jsluice] httpx exited with code {proc.returncode}; "
+                f"dropping unverified jsluice URLs. stderr: {' | '.join(stderr_tail)}"
+            )
             stats["jsluice_skipped_unverified"] = len(candidates)
             return set(), stats
 

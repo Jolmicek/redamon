@@ -1182,8 +1182,10 @@ def run_jsluice(config: dict) -> None:
     and/or accepts user-provided URLs, then runs jsluice analysis on them.
     """
     from recon.helpers.resource_enum import (
+        DEFAULT_JSLUICE_EXCLUDE_PATTERNS,
         run_jsluice_analysis,
         merge_jsluice_into_by_base_url,
+        verify_jsluice_urls,
     )
     from recon.project_settings import get_settings
 
@@ -1305,6 +1307,19 @@ def run_jsluice(config: dict) -> None:
     JSLUICE_EXTRACT_URLS = settings.get('JSLUICE_EXTRACT_URLS', True)
     JSLUICE_EXTRACT_SECRETS = settings.get('JSLUICE_EXTRACT_SECRETS', True)
     JSLUICE_CONCURRENCY = settings.get('JSLUICE_CONCURRENCY', 5)
+    JSLUICE_VERIFY_URLS = settings.get('JSLUICE_VERIFY_URLS', True)
+    JSLUICE_VERIFY_DOCKER_IMAGE = settings.get('JSLUICE_VERIFY_DOCKER_IMAGE', 'projectdiscovery/httpx:latest')
+    JSLUICE_VERIFY_TIMEOUT = settings.get('JSLUICE_VERIFY_TIMEOUT', 5)
+    JSLUICE_VERIFY_RATE_LIMIT = settings.get('JSLUICE_VERIFY_RATE_LIMIT', 50)
+    JSLUICE_VERIFY_THREADS = settings.get('JSLUICE_VERIFY_THREADS', 50)
+    JSLUICE_VERIFY_ACCEPT_STATUS = settings.get(
+        'JSLUICE_VERIFY_ACCEPT_STATUS',
+        [200, 201, 301, 302, 307, 308, 401, 403]
+    )
+    JSLUICE_EXCLUDE_PATTERNS = list(settings.get(
+        'JSLUICE_EXCLUDE_PATTERNS',
+        DEFAULT_JSLUICE_EXCLUDE_PATTERNS,
+    ))
 
     use_proxy = False
     try:
@@ -1333,8 +1348,36 @@ def run_jsluice(config: dict) -> None:
     jsluice_urls = jsluice_result.get("urls", [])
     jsluice_secrets = jsluice_result.get("secrets", [])
     external_domains = jsluice_result.get("external_domains", [])
+    jsluice_urls_pre_verify_count = len(jsluice_urls)
 
     print(f"[+][Partial Recon] jsluice found {len(jsluice_urls)} URLs, {len(jsluice_secrets)} secrets, {len(external_domains)} external domains")
+
+    # Mirror the full-pipeline verification step so the same noise/dead-URL filter
+    # applies whether jsluice runs as part of the full scan or via partial recon.
+    verify_stats = {
+        "jsluice_verify_total": 0,
+        "jsluice_verify_candidates": 0,
+        "jsluice_skipped_blacklist": 0,
+        "jsluice_verified": 0,
+        "jsluice_skipped_unverified": 0,
+    }
+    if jsluice_urls and JSLUICE_VERIFY_URLS:
+        verified_set, verify_stats = verify_jsluice_urls(
+            jsluice_urls,
+            JSLUICE_VERIFY_DOCKER_IMAGE,
+            JSLUICE_VERIFY_THREADS,
+            JSLUICE_VERIFY_TIMEOUT,
+            JSLUICE_VERIFY_RATE_LIMIT,
+            JSLUICE_VERIFY_ACCEPT_STATUS,
+            JSLUICE_EXCLUDE_PATTERNS,
+            use_proxy,
+        )
+        jsluice_urls = sorted(verified_set)
+        print(f"[+][Partial Recon] jsluice verification kept {len(jsluice_urls)}/{jsluice_urls_pre_verify_count} URLs")
+    elif jsluice_urls:
+        verify_stats["jsluice_verify_total"] = jsluice_urls_pre_verify_count
+        verify_stats["jsluice_verify_candidates"] = jsluice_urls_pre_verify_count
+        verify_stats["jsluice_verified"] = jsluice_urls_pre_verify_count
 
     # Organize extracted URLs into by_base_url structure
     by_base_url = {}
@@ -1344,12 +1387,14 @@ def run_jsluice(config: dict) -> None:
         "jsluice_new": 0,
         "jsluice_overlap": 0,
     }
+    jsluice_stats.update(verify_stats)
 
     if jsluice_urls:
-        by_base_url, jsluice_stats = merge_jsluice_into_by_base_url(
+        by_base_url, merge_stats = merge_jsluice_into_by_base_url(
             jsluice_urls,
             {},  # Start with empty -- jsluice is the only source
         )
+        jsluice_stats.update(merge_stats)
         print(f"[+][Partial Recon] Organized {jsluice_stats['jsluice_new']} new endpoints across {len(by_base_url)} base URLs")
 
     # Build recon_data for graph update (needs domain + subdomains for scope)

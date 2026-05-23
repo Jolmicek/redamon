@@ -366,6 +366,46 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       }
     }
 
+    else if (toolId === 'EndpointAiClassifier') {
+      try {
+        const session = getSession()
+        try {
+          const result = await session.run(
+            `OPTIONAL MATCH (d:Domain {user_id: $uid, project_id: $pid})
+             WITH d
+             OPTIONAL MATCH (e:Endpoint {user_id: $uid, project_id: $pid})
+             OPTIONAL MATCH (p:Parameter {user_id: $uid, project_id: $pid})
+             OPTIONAL MATCH (e2:Endpoint {user_id: $uid, project_id: $pid})
+               WHERE e2.ai_interface_type IS NOT NULL AND e2.ai_interface_type <> 'non-llm'
+             RETURN d.name AS domain,
+                    count(DISTINCT e) AS endpointCount,
+                    count(DISTINCT p) AS parameterCount,
+                    count(DISTINCT e2) AS alreadyClassifiedCount`,
+            { uid: project.userId, pid: projectId }
+          )
+          const record = result.records[0]
+          const domain = record?.get('domain') || null
+          const endpointCount = record?.get('endpointCount')?.toNumber?.() ?? record?.get('endpointCount') ?? 0
+          const parameterCount = record?.get('parameterCount')?.toNumber?.() ?? record?.get('parameterCount') ?? 0
+          const alreadyClassifiedCount = record?.get('alreadyClassifiedCount')?.toNumber?.() ?? record?.get('alreadyClassifiedCount') ?? 0
+
+          if (domain) {
+            return NextResponse.json({
+              domain,
+              existing_endpoints_count: endpointCount,
+              existing_parameters_count: parameterCount,
+              already_ai_classified_count: alreadyClassifiedCount,
+              source: 'graph',
+            })
+          }
+        } finally {
+          await session.close()
+        }
+      } catch (err) {
+        console.warn('Neo4j query failed for EndpointAiClassifier graph-inputs, falling back to settings:', err)
+      }
+    }
+
     else if (toolId === 'Ffuf') {
       try {
         const session = getSession()

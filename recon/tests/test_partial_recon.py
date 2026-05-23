@@ -2973,6 +2973,18 @@ class TestRunJsluice(unittest.TestCase):
         mock_helpers_resource_enum = MagicMock()
         mock_helpers_resource_enum.run_jsluice_analysis = mock_jsluice_analysis
         mock_helpers_resource_enum.merge_jsluice_into_by_base_url = mock_merge
+        # B2 added URL verification to partial recon. Mock the verifier as a passthrough
+        # so existing partial-recon tests stay focused on the graph-write contract.
+        def _mock_verify_passthrough(urls, *args, **kwargs):
+            return set(urls), {
+                "jsluice_verify_total": len(urls),
+                "jsluice_verify_candidates": len(urls),
+                "jsluice_skipped_blacklist": 0,
+                "jsluice_verified": len(urls),
+                "jsluice_skipped_unverified": 0,
+            }
+        mock_helpers_resource_enum.verify_jsluice_urls = MagicMock(side_effect=_mock_verify_passthrough)
+        mock_helpers_resource_enum.DEFAULT_JSLUICE_EXCLUDE_PATTERNS = []
 
         mock_graph_db = MagicMock()
         mock_graph_db.Neo4jClient = mock_neo4j_cls

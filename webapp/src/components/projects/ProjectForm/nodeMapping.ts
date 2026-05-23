@@ -15,6 +15,7 @@ export const SECTION_INPUT_MAP: Record<string, string[]> = {
   ParamSpider:        ['Domain', 'Subdomain'],
   Kiterunner:         ['BaseURL'],
   Arjun:              ['BaseURL', 'Endpoint'],
+  EndpointAiClassifier: ['Endpoint', 'Parameter', 'BaseURL'],
   Nuclei:             ['BaseURL', 'Endpoint', 'Technology', 'Domain', 'Subdomain'],
   CveLookup:          ['Technology'],
   GvmScan:            ['IP', 'Port', 'Subdomain', 'Domain'],
@@ -45,6 +46,7 @@ export const SECTION_NODE_MAP: Record<string, string[]> = {
   ParamSpider:        ['Endpoint', 'Parameter', 'BaseURL', 'ExternalDomain'],
   Kiterunner:         ['Endpoint', 'BaseURL'],
   Arjun:              ['Parameter'],
+  EndpointAiClassifier: [],   // produces no new nodes — pure enrichment
   Nuclei:             ['Vulnerability', 'Endpoint', 'Parameter', 'CVE', 'MitreData', 'Capec'],
   CveLookup:          ['CVE', 'MitreData', 'Capec'],
   GvmScan:            ['Vulnerability', 'Technology', 'Traceroute', 'Certificate', 'ExploitGvm', 'CVE', 'MitreData', 'Capec'],
@@ -67,6 +69,7 @@ export const SECTION_ENRICH_MAP: Record<string, string[]> = {
   Masscan:            ['IP', 'Domain'],
   Nmap:               ['Port', 'Service'],
   Httpx:              ['Subdomain', 'Domain'],
+  EndpointAiClassifier: ['Endpoint', 'Parameter'],
   SecurityChecks:     ['IP'],
   GraphqlScan:        ['Endpoint'],
   VhostSni:           ['Subdomain', 'IP'],

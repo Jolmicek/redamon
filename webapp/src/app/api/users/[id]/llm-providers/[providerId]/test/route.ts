@@ -33,7 +33,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         return NextResponse.json({ error: 'Provider not found' }, { status: 404 })
       }
       const isMasked = (v: unknown) => typeof v === 'string' && v.startsWith('••••')
-      const SECRET_FIELDS = new Set(['apiKey', 'awsAccessKeyId', 'awsSecretKey'])
+      const SECRET_FIELDS = new Set(['apiKey', 'awsAccessKeyId', 'awsSecretKey', 'awsBearerToken'])
       config = { ...(provider as unknown as Record<string, unknown>) }
       for (const [key, value] of Object.entries(body)) {
         if (SECRET_FIELDS.has(key) && isMasked(value)) {

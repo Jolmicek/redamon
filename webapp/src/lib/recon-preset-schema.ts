@@ -146,6 +146,13 @@ export const reconPresetSchema = z.object({
   bannerGrabThreads: int,
   bannerGrabMaxLength: int,
 
+  // -- Resource Enum AI Classifier (cross-cutting endpoint + parameter tagging) --
+  resourceEnumAiClassifierEnabled: bool,
+  resourceEnumAiPathClassifierEnabled: bool,
+  resourceEnumAiRagPathFlagEnabled: bool,
+  resourceEnumAiParamInjectableFlagEnabled: bool,
+  resourceEnumAiToolArgPathEnabled: bool,
+
   // -- Web Crawling: Katana --
   katanaEnabled: bool,
   katanaDepth: int,
@@ -178,6 +185,13 @@ export const reconPresetSchema = z.object({
   jsluiceExtractSecrets: bool,
   jsluiceConcurrency: int,
   jsluiceParallelism: int,
+  jsluiceVerifyUrls: bool,
+  jsluiceVerifyDockerImage: str,
+  jsluiceVerifyTimeout: int,
+  jsluiceVerifyRateLimit: int,
+  jsluiceVerifyThreads: int,
+  jsluiceVerifyAcceptStatus: intArr,
+  jsluiceExcludePatterns: strArr,
 
   // -- JS Analysis: JS Recon --
   jsReconEnabled: bool,
@@ -573,6 +587,13 @@ export const RECON_PARAMETER_CATALOG = `
 - bannerGrabThreads: integer
 - bannerGrabMaxLength: integer
 
+## Resource Enum AI Classifier
+- resourceEnumAiClassifierEnabled: boolean - Master toggle for the cross-cutting AI endpoint + parameter classifier that runs after the URL discovery tools (Katana, Hakrawler, GAU, FFuf, ParamSpider, Arjun, Kiterunner, jsluice). Pure regex, no extra traffic.
+- resourceEnumAiPathClassifierEnabled: boolean - Stamp Endpoint.ai_interface_type by matching path against the LLM/completion/embedding/tool-call/SSE/MCP/GraphQL catalogue (OpenAI /v1/chat/completions, Anthropic /v1/messages, Ollama /api/chat, Gemini :generateContent, MCP /mcp, LangServe /stream, etc.)
+- resourceEnumAiRagPathFlagEnabled: boolean - Stamp Endpoint.is_ai_rag_ingest=true for known RAG paths (OpenAI Vector Stores, Pinecone /vectors/upsert, Weaviate /v1/objects, Qdrant /collections/.../points). Ambiguous paths (/upload, /search, /query) only fire when parent BaseURL is AI-tagged.
+- resourceEnumAiParamInjectableFlagEnabled: boolean - Stamp Parameter.is_ai_prompt_injectable=true on AI-classified endpoints when the parameter name matches the prompt-injection catalogue (prompt, messages, system, contents, inputs, arguments, etc.)
+- resourceEnumAiToolArgPathEnabled: boolean - Reserved for the future ai_surface_recon central module — resolves Parameter.ai_tool_arg_path against discovered OpenAPI / ai-plugin.json / MCP tools/list specs. No-op today.
+
 ## Web Crawling - Katana
 - katanaEnabled: boolean - Run Katana web crawler
 - katanaDepth: integer - Crawl depth
@@ -605,6 +626,13 @@ export const RECON_PARAMETER_CATALOG = `
 - jsluiceExtractSecrets: boolean
 - jsluiceConcurrency: integer
 - jsluiceParallelism: integer - Base URLs analyzed in parallel
+- jsluiceVerifyUrls: boolean - After extraction, run extracted URLs through httpx and a deny-list filter so only live, non-asset URLs reach the graph. Disable to keep all extracted URLs (legacy behavior).
+- jsluiceVerifyDockerImage: string - httpx Docker image used for verification
+- jsluiceVerifyTimeout: integer - Per-request httpx timeout in seconds
+- jsluiceVerifyRateLimit: integer - Max probe requests per second
+- jsluiceVerifyThreads: integer - httpx worker threads
+- jsluiceVerifyAcceptStatus: array of integers - HTTP status codes treated as "live" by the verifier
+- jsluiceExcludePatterns: array of strings - Deny-list patterns. Extensions like ".js" match the path suffix only; everything else is a substring match against the URL path and query.
 
 ## JavaScript Analysis - JS Recon (deep)
 - jsReconEnabled: boolean - Run deep JS analysis

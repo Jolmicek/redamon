@@ -435,7 +435,7 @@ export function SubdomainDiscoverySection({ data, updateField, onRun }: Subdomai
               <div className={styles.toggleRowCompactInfo}>
                 <span className={styles.toggleLabelLg}>AI TXT/SPF/DKIM Hint</span>
                 <p className={styles.toggleDescription}>
-                  Regex captured TXT records (incl. SPF, DKIM, DMARC) for AI vendor domains: <code>anthropic.com</code>, <code>openai.com</code>, <code>huggingface.co</code>, <code>replicate.com</code>, <code>langchain.com</code>, <code>langfuse.com</code>, <code>cohere.com</code>, <code>together.ai</code>, <code>groq.com</code>, <code>mistral.ai</code>. On match, sets <code>Subdomain.ai_service_hint</code>.
+                  Regex captured TXT records (incl. SPF, DKIM, DMARC) for AI vendor domains: anthropic.com, openai.com, huggingface.co, replicate.com, langchain.com, langfuse.com, cohere.com, together.ai, groq.com, mistral.ai. On match, sets Subdomain.ai_service_hint.
                 </p>
               </div>
               <Toggle
@@ -448,7 +448,7 @@ export function SubdomainDiscoverySection({ data, updateField, onRun }: Subdomai
               <div className={styles.toggleRowCompactInfo}>
                 <span className={styles.toggleLabelLg}>AI NS Hint</span>
                 <p className={styles.toggleDescription}>
-                  Weak signal: tag <code>Subdomain.ai_service_hint = &quot;ai-hosting-candidate&quot;</code> when NS records point at AI-friendly hosts (Vercel, Netlify, Replit, Modal, HuggingFace Spaces). Never overrides a stronger TXT hint.
+                  Weak signal: tag Subdomain.ai_service_hint = "ai-hosting-candidate" when NS records point at AI-friendly hosts (Vercel, Netlify, Replit, Modal, HuggingFace Spaces). Never overrides a stronger TXT hint.
                 </p>
               </div>
               <Toggle

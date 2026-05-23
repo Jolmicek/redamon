@@ -256,7 +256,7 @@ The schema already has all common fields:
 |---|---|
 | `apiKey` | Single-key providers (10 of the 11 existing types use this) |
 | `baseUrl`, `modelIdentifier`, `defaultHeaders`, `timeout`, `temperature`, `maxTokens`, `sslVerify` | `openai_compatible` providers |
-| `awsRegion`, `awsAccessKeyId`, `awsSecretKey` | Bedrock |
+| `awsRegion`, `awsAccessKeyId`, `awsSecretKey`, `awsBearerToken` | Bedrock (IAM mode uses access key + secret; long-term API key mode uses `awsBearerToken`. The two are mutually exclusive at save time.) |
 
 **Do not add new columns unless your provider needs a fundamentally new credential shape** (OAuth, JWT, service account JSON, multi-key rotation, etc.). Adding optional columns inflates the model for everyone.
 
@@ -503,7 +503,7 @@ Use this table as a quick comparison. Every cell is a real value in today's code
 | Qwen (Alibaba) | `qwen` | `ChatOpenAI` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen/` | `Authorization: Bearer` | OpenAI-compat `/models` + fallback |
 | xAI (Grok) | `xai` | `ChatOpenAI` | `https://api.x.ai/v1` | `xai/` | `Authorization: Bearer` | OpenAI-compat `/models` + fallback |
 | Mistral | `mistral` | `ChatOpenAI` | `https://api.mistral.ai/v1` | `mistral/` | `Authorization: Bearer` | OpenAI-compat `/models` + fallback |
-| AWS Bedrock | `bedrock` | `ChatBedrockConverse` | (boto3, region-routed) | `bedrock/` | AWS SigV4 (access key + secret + region) | `bedrock.list_foundation_models(byOutputModality=TEXT, byInferenceType=ON_DEMAND)` |
+| AWS Bedrock | `bedrock` | `ChatBedrockConverse` | (boto3, region-routed) | `bedrock/` | Two modes: SigV4 (IAM access key + secret + region) **or** Bedrock long-term API key (passed as `bedrock_api_key=` / `AWS_BEARER_TOKEN_BEDROCK`). Backend picks bearer when `awsBearerToken` is non-empty. | `bedrock.list_foundation_models(byOutputModality=TEXT, byInferenceType=ON_DEMAND)` |
 | OpenAI-compatible (user supplies) | `openai_compatible` | `ChatOpenAI` | user-supplied | `custom/{providerConfigId}` | user-supplied headers | single entry, no discovery (`modelIdentifier` is the only model) |
 
 ---

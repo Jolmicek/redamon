@@ -161,6 +161,23 @@ We lose the explicit disambiguate-skipped test for these three ports, but the di
 
 `open-webui`, `librechat`, `anythingllm`, `flowise`, `langflow`, `dify`, `comfyui`, `gradio`, `streamlit`, `chatgpt-clone`, `hf-chat-ui`, `lobechat`, `nextchat`, `sillytavern`, `jan`, `h2ogpt`, `privategpt`, `quivr`.
 
+### Port 9103 — endpoint AI classifier showroom (Lap-2)
+
+Serves an HTML index at `/` linking to **21 catalogued AI paths** plus **8 unambiguous RAG paths**. Each link carries query-string params: one or two prompt-named (`messages`, `prompt`, `system`, `contents`, `input`, `inputs`, `instructions`, `suffix`, `arguments`, `query`) and one control name (`model`, `temperature`, `max_tokens`, `assistant_id`, `method`, etc.). This exercises the **resource_enum AI classifier** end-to-end:
+
+| Catalogued path | `ai_interface_type` stamped |
+|---|---|
+| `/v1/chat/completions`, `/v1/messages`, `/api/chat`, `/v1beta/models/*:generateContent`, `/v2/chat`, `/v1/sonar` | `llm-chat` |
+| `/v1/completions`, `/v1/fim/completions`, `/api/generate` | `llm-completion` |
+| `/v1/embeddings`, `/api/embed`, `/v2/embed` | `llm-embedding` |
+| `/v1/threads/<id>/runs`, `/v1/responses/<id>/input_items` | `llm-tool-call` |
+| `/generate_stream`, `/agents/<id>/stream` | `sse-stream` |
+| `/mcp`, `/api/mcp`, `/sse`, `/tools/list` | `mcp` |
+| `/graphql` | `llm-graphql` |
+| `/v1/files`, `/v1/uploads`, `/v1/vector_stores(/<id>(/search)?)?`, `/v1/assistants`, `/vectors/upsert`, `/v1/objects`, `/collections/<name>/points/search` | RAG ingest (`is_ai_rag_ingest=true`) |
+
+The classifier reads existing Endpoint + Parameter nodes from the graph after Katana finishes — no probe traffic of its own. Required project settings: `katanaEnabled=true`, `resourceEnumAiClassifierEnabled=true` (default on).
+
 ## How to bring up
 
 ```bash

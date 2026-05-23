@@ -38,6 +38,8 @@ export const WORKFLOW_TOOLS: WorkflowToolDef[] = [
   { id: 'ParamSpider', label: 'ParamSpider', enabledField: 'paramspiderEnabled', group: 5, badge: 'passive' },
   { id: 'Kiterunner',  label: 'Kiterunner',  enabledField: 'kiterunnerEnabled',  group: 5, badge: 'active' },
   { id: 'Arjun',       label: 'Arjun',       enabledField: 'arjunEnabled',       group: 5, badge: 'active' },
+  { id: 'EndpointAiClassifier', label: 'Endpoint AI Classifier',
+    enabledField: 'resourceEnumAiClassifierEnabled', group: 5, badge: 'passive' },
 
   // Group 5.5 - JS Recon
   { id: 'JsRecon', label: 'JS Recon', enabledField: 'jsReconEnabled', group: 5.5, badge: 'both' },

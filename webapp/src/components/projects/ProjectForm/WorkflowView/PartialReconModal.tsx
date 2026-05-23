@@ -129,6 +129,12 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
     'Targets are loaded from the graph (BaseURLs from prior HTTP probing). ' +
     'You can also provide custom URLs below. ' +
     'Endpoint and BaseURL nodes are merged into the existing graph.',
+  EndpointAiClassifier:
+    'Re-runs the AI surface classifier over every Endpoint and Parameter already in the graph. ' +
+    'Stamps Endpoint.ai_interface_type (llm-chat / llm-completion / llm-embedding / llm-tool-call / sse-stream / mcp / llm-graphql / non-llm), ' +
+    'flags is_ai_rag_ingest on RAG ingestion paths, and marks parameters whose names match the prompt-injection catalogue as is_ai_prompt_injectable. ' +
+    'No traffic is sent to the target — pure pattern matching against data the URL-discovery tools already collected. ' +
+    'Useful when the catalogue has been updated, when a new lap of AI annotations ships, or when classifier toggles were off during the original scan.',
   JsRecon:
     'Comprehensive JavaScript reconnaissance scanner. Downloads JS files from discovered URLs ' +
     'and runs 6 analysis modules: secret detection (100+ patterns with live validation), endpoint extraction, ' +
@@ -564,6 +570,7 @@ export function PartialReconModal({
     || (isGraphql && !loadingInputs && (graphInputs?.existing_baseurls_count ?? 0) === 0 && (graphInputs?.existing_endpoints_count ?? 0) === 0)
     || (isResourceEnum && !isNuclei && toolId !== 'JsRecon' && !loadingInputs && (graphInputs?.existing_baseurls_count ?? 0) === 0)
     || (isArjun && !loadingInputs && (graphInputs?.existing_baseurls_count ?? 0) === 0 && (graphInputs?.existing_endpoints_count ?? 0) === 0)
+    || (toolId === 'EndpointAiClassifier' && !loadingInputs && (graphInputs?.existing_endpoints_count ?? 0) === 0)
     || (isSecurityChecks && !loadingInputs && (graphInputs?.existing_ips_count ?? 0) === 0 && (graphInputs?.existing_subdomains_count ?? 0) === 0 && (graphInputs?.existing_baseurls_count ?? 0) === 0)
     || (toolId === 'Shodan' && !loadingInputs && (graphInputs?.existing_ips_count ?? 0) === 0)
     || (toolId === 'OsintEnrichment' && !loadingInputs && (graphInputs?.existing_ips_count ?? 0) === 0)

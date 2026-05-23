@@ -519,6 +519,7 @@ def _build_llm_with_model_for_user(model_name: str, user_id: Optional[str]):
         mistral_api_key=(mistral_p or {}).get("apiKey"),
         aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
+        aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
         aws_region=(bedrock_p or {}).get("awsRegion") or "us-east-1",
     )
 
@@ -1136,6 +1137,7 @@ def _setup_llm_for_endpoint(model_name: str) -> "BaseChatModel":
         mistral_api_key=(mistral_p or {}).get("apiKey"),
         aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
+        aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
         aws_region=(bedrock_p or {}).get("awsRegion") or "us-east-1",
         custom_llm_config=custom_config,
     )
@@ -1241,6 +1243,7 @@ def _build_llm_for_user(user_id: Optional[str]):
         mistral_api_key=(mistral_p or {}).get("apiKey"),
         aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
+        aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
         aws_region=(bedrock_p or {}).get("awsRegion") or "us-east-1",
     )
 
@@ -1727,6 +1730,7 @@ class LlmProviderTestRequest(BaseModel):
     awsRegion: str = "us-east-1"
     awsAccessKeyId: str = ""
     awsSecretKey: str = ""
+    awsBearerToken: str = ""
 
 
 @app.post("/llm-provider/test", tags=["System"])
@@ -1806,10 +1810,29 @@ async def test_llm_provider(body: LlmProviderTestRequest):
             pick = next((m for m in available if "small" in m["id"].lower() or "nemo" in m["id"].lower()), available[0])
             llm = setup_llm(pick["id"], mistral_api_key=body.apiKey)
         elif ptype == "bedrock":
+            from orchestrator_helpers.model_providers import fetch_bedrock_models
+            available = await fetch_bedrock_models(
+                region=body.awsRegion,
+                access_key_id=body.awsAccessKeyId,
+                secret_access_key=body.awsSecretKey,
+                bearer_token=body.awsBearerToken,
+            )
+            if not available:
+                return JSONResponse(
+                    content={"success": False, "error": "No Bedrock models available — check region, credentials, and Model Access in the Bedrock console."},
+                    status_code=400,
+                )
+            # Prefer a small Haiku/Nova model for the smoke test if present;
+            # otherwise fall back to the first listed model.
+            pick = next(
+                (m for m in available if "haiku" in m["id"].lower() or "nova-micro" in m["id"].lower()),
+                available[0],
+            )
             llm = setup_llm(
-                "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                pick["id"],
                 aws_access_key_id=body.awsAccessKeyId,
                 aws_secret_access_key=body.awsSecretKey,
+                aws_bearer_token=body.awsBearerToken,
                 aws_region=body.awsRegion,
             )
         elif ptype == "openai_compatible":
@@ -2519,6 +2542,7 @@ async def text_to_cypher(body: TextToCypherRequest):
                 mistral_api_key=(mistral_p or {}).get("apiKey"),
                 aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
                 aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
+                aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
                 aws_region=(bedrock_p or {}).get("awsRegion") or "us-east-1",
             )
     except Exception as e:

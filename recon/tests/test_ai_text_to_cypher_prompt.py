@@ -252,6 +252,11 @@ PROPERTY_TO_LABEL: dict[str, str] = {
     "is_ai_framework_detected":  "Endpoint",
     "ai_framework_name":         "Endpoint",
     "ai_frontend_product_guess": "Endpoint",
+    # Lap 2 — resource_enum endpoint AI classifier
+    "ai_interface_type":         "Endpoint",
+    "is_ai_rag_ingest":          "Endpoint",
+    "is_ai_prompt_injectable":   "Parameter",
+    "ai_tool_arg_path":          "Parameter",
 }
 
 
@@ -365,20 +370,21 @@ def test_prompt_does_not_advertise_unsupported_categories():
 # ---------------------------------------------------------------------------
 
 def test_prompt_does_not_promise_lap2plus_properties():
-    """The plan reserves these properties for later laps (resource_enum,
-    vuln_scan, trufflehog…). Listing them now in the prompt would lead
-    the agent to write Cypher against fields that simply don't exist yet,
-    yielding empty results and confusing the operator."""
+    """The plan reserves these properties for later laps (vuln_scan,
+    trufflehog, central ai_surface_recon). Listing them now in the prompt
+    would lead the agent to write Cypher against fields that simply don't
+    exist yet, yielding empty results and confusing the operator.
+
+    Note: ai_interface_type, is_ai_rag_ingest, is_ai_prompt_injectable and
+    ai_tool_arg_path are NO LONGER on this list — they ship with the
+    resource_enum AI classifier lap and are correctly listed in the prompt.
+    """
     block = _extract_ai_block(_extract_text_to_cypher_block(_read_prompt_source()))
     reserved_for_later_laps = [
-        "ai_interface_type",     # Endpoint, resource_enum lap
-        "is_ai_rag_ingest",      # Endpoint, resource_enum lap
         "ai_tool_schema_ref",    # Endpoint, central ai_surface_recon lap
         "ai_supports_streaming", # Endpoint, central lap
         "ai_supports_tools",     # Endpoint, central lap
         "ai_supports_vision",    # Endpoint, central lap
-        "is_ai_prompt_injectable",  # Parameter, resource_enum lap
-        "ai_tool_arg_path",      # Parameter, resource_enum lap
         "ai_owasp_llm_id",       # Vulnerability, vuln_scan lap
         "ai_atlas_technique",    # Vulnerability, vuln_scan lap
         "ai_provider",           # Secret, trufflehog lap

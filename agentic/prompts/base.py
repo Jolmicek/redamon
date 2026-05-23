@@ -2314,11 +2314,24 @@ Properties currently written (lap 1 — domain_recon, port_scan, http_probe):
                   `ai_framework_name` (e.g. "vllm", "langchain", "litellm",
                   "anthropic"),
                   `ai_frontend_product_guess` (e.g. "open-webui", "librechat",
-                  "flowise", "dify", "gradio", "streamlit")
+                  "flowise", "dify", "gradio", "streamlit"),
+                  `ai_interface_type` (enum: "llm-chat", "llm-completion",
+                  "llm-embedding", "llm-tool-call", "sse-stream", "mcp",
+                  "llm-graphql", "non-llm" — set by resource_enum path
+                  classifier),
+                  `is_ai_rag_ingest` (bool — set by resource_enum when path
+                  looks like a RAG ingestion or retrieval endpoint;
+                  ambiguous paths like /search are only flagged when the
+                  parent BaseURL is already AI-tagged)
                   (Patch D: AI annotations live on Endpoint, not BaseURL.
                   BaseURL = scheme+host+port. Endpoint = path under a BaseURL.
                   Reach Endpoint via (BaseURL)-[:HAS_ENDPOINT]->(Endpoint)
                   or directly by Endpoint.baseurl property.)
+  - Parameter:    `is_ai_prompt_injectable` (bool — set by resource_enum
+                  when the parameter name is in the prompt-injection
+                  catalogue AND the parent Endpoint is AI-classified),
+                  `ai_tool_arg_path` (string JSON Pointer — reserved for
+                  the central ai_surface_recon module, no value today)
 
 Value-prefixed reused fields (lap 1):
 
@@ -2357,6 +2370,23 @@ Useful AI surface query patterns:
   - "Services running AI runtimes per nmap version regex":
       MATCH (svc:Service) WHERE svc.ai_runtime_version IS NOT NULL
       RETURN svc.ai_runtime_version, svc.port, count(*) AS n
+
+  - "Endpoints by AI interface type" (resource_enum classifier rollup):
+      MATCH (e:Endpoint) WHERE e.ai_interface_type IS NOT NULL
+        AND e.ai_interface_type <> 'non-llm'
+      RETURN e.ai_interface_type, count(*) AS endpoints
+      ORDER BY endpoints DESC
+
+  - "Potentially prompt-injectable params on chat endpoints":
+      MATCH (e:Endpoint)-[:HAS_PARAMETER]->(p:Parameter)
+      WHERE p.is_ai_prompt_injectable = true
+        AND e.ai_interface_type STARTS WITH 'llm-'
+      RETURN e.baseurl, e.path, e.ai_interface_type, p.name, p.position
+      ORDER BY e.baseurl, e.path
+
+  - "RAG ingestion endpoints (where uploaded content reaches the model)":
+      MATCH (e:Endpoint) WHERE e.is_ai_rag_ingest = true
+      RETURN e.baseurl, e.path, e.ai_interface_type
 
   - "Any node carrying any AI annotation" (catch-all):
       MATCH (n) WHERE any(k IN keys(n)
