@@ -66,6 +66,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'NAABU_SKIP_HOST_DISCOVERY': True,
     'NAABU_VERIFY_PORTS': True,
     'NAABU_PASSIVE_MODE': False,
+    # AI surface recon — annotate AI-bearing ports (Ollama 11434, Qdrant 6333, Open WebUI 8080, …) on naabu output
+    'PORT_SCAN_AI_PORT_CATALOG_ENABLED': True,
 
     # Nmap Service Detection & NSE Vuln Scripts
     'NMAP_ENABLED': True,
@@ -75,6 +77,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'NMAP_TIMEOUT': 600,
     'NMAP_HOST_TIMEOUT': 300,
     'NMAP_PARALLELISM': 5,
+    # AI surface recon — regex nmap product/version strings against AI runtimes (Ollama, vLLM, LiteLLM, TGI, …)
+    'NMAP_AI_VERSION_REGEX_ENABLED': True,
 
     # Masscan Port Scanner (disabled by default -- only useful for large IP ranges/CIDRs)
     'MASSCAN_ENABLED': False,
@@ -85,6 +89,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'MASSCAN_WAIT': 10,
     'MASSCAN_RETRIES': 1,
     'MASSCAN_EXCLUDE_TARGETS': '',
+    # AI surface recon — same AI port catalogue applied to masscan output
+    'MASSCAN_AI_PORT_CATALOG_ENABLED': True,
 
     # httpx HTTP Probing
     'HTTPX_ENABLED': True,
@@ -131,6 +137,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     ],
     'HTTPX_MATCH_CODES': [],
     'HTTPX_FILTER_CODES': [],
+    # AI surface recon — annotate captured response headers / favicon / title against AI vendor catalogues
+    'HTTP_PROBE_AI_HEADER_SCAN_ENABLED': True,
+    'HTTP_PROBE_AI_FAVICON_HASH_ENABLED': True,
+    'HTTP_PROBE_AI_TITLE_DETECTION_ENABLED': True,
+    'HTTP_PROBE_AI_WAPPALYZER_ENABLED': True,
 
     # Wappalyzer
     'WAPPALYZER_ENABLED': True,
@@ -534,6 +545,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Subdomain Discovery
     'SUBDOMAIN_DISCOVERY_ENABLED': True,
 
+    # AI surface recon hooks inside domain_recon (TXT/NS hint annotation during DNS pass)
+    'DOMAIN_RECON_AI_TXT_HINT_ENABLED': True,
+    'DOMAIN_RECON_AI_NS_HINT_ENABLED': True,
+
     # Subdomain Discovery Tool Toggles
     'CRTSH_ENABLED': True,
     'CRTSH_MAX_RESULTS': 5000,
@@ -716,6 +731,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['NAABU_SKIP_HOST_DISCOVERY'] = project.get('naabuSkipHostDiscovery', DEFAULT_SETTINGS['NAABU_SKIP_HOST_DISCOVERY'])
     settings['NAABU_VERIFY_PORTS'] = project.get('naabuVerifyPorts', DEFAULT_SETTINGS['NAABU_VERIFY_PORTS'])
     settings['NAABU_PASSIVE_MODE'] = project.get('naabuPassiveMode', DEFAULT_SETTINGS['NAABU_PASSIVE_MODE'])
+    settings['PORT_SCAN_AI_PORT_CATALOG_ENABLED'] = project.get('portScanAiPortCatalogEnabled', DEFAULT_SETTINGS['PORT_SCAN_AI_PORT_CATALOG_ENABLED'])
 
     # Masscan Port Scanner
     settings['MASSCAN_ENABLED'] = project.get('masscanEnabled', DEFAULT_SETTINGS['MASSCAN_ENABLED'])
@@ -726,6 +742,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['MASSCAN_WAIT'] = project.get('masscanWait', DEFAULT_SETTINGS['MASSCAN_WAIT'])
     settings['MASSCAN_RETRIES'] = project.get('masscanRetries', DEFAULT_SETTINGS['MASSCAN_RETRIES'])
     settings['MASSCAN_EXCLUDE_TARGETS'] = project.get('masscanExcludeTargets', DEFAULT_SETTINGS['MASSCAN_EXCLUDE_TARGETS'])
+    settings['MASSCAN_AI_PORT_CATALOG_ENABLED'] = project.get('masscanAiPortCatalogEnabled', DEFAULT_SETTINGS['MASSCAN_AI_PORT_CATALOG_ENABLED'])
 
     # Nmap Service Detection & NSE Vuln Scripts
     settings['NMAP_ENABLED'] = project.get('nmapEnabled', DEFAULT_SETTINGS['NMAP_ENABLED'])
@@ -735,6 +752,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['NMAP_TIMEOUT'] = project.get('nmapTimeout', DEFAULT_SETTINGS['NMAP_TIMEOUT'])
     settings['NMAP_HOST_TIMEOUT'] = project.get('nmapHostTimeout', DEFAULT_SETTINGS['NMAP_HOST_TIMEOUT'])
     settings['NMAP_PARALLELISM'] = project.get('nmapParallelism', DEFAULT_SETTINGS['NMAP_PARALLELISM'])
+    settings['NMAP_AI_VERSION_REGEX_ENABLED'] = project.get('nmapAiVersionRegexEnabled', DEFAULT_SETTINGS['NMAP_AI_VERSION_REGEX_ENABLED'])
 
     # httpx HTTP Probing
     settings['HTTPX_ENABLED'] = project.get('httpxEnabled', DEFAULT_SETTINGS['HTTPX_ENABLED'])
@@ -769,6 +787,10 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['HTTPX_CUSTOM_HEADERS'] = project.get('httpxCustomHeaders', DEFAULT_SETTINGS['HTTPX_CUSTOM_HEADERS'])
     settings['HTTPX_MATCH_CODES'] = project.get('httpxMatchCodes', DEFAULT_SETTINGS['HTTPX_MATCH_CODES'])
     settings['HTTPX_FILTER_CODES'] = project.get('httpxFilterCodes', DEFAULT_SETTINGS['HTTPX_FILTER_CODES'])
+    settings['HTTP_PROBE_AI_HEADER_SCAN_ENABLED'] = project.get('httpProbeAiHeaderScanEnabled', DEFAULT_SETTINGS['HTTP_PROBE_AI_HEADER_SCAN_ENABLED'])
+    settings['HTTP_PROBE_AI_FAVICON_HASH_ENABLED'] = project.get('httpProbeAiFaviconHashEnabled', DEFAULT_SETTINGS['HTTP_PROBE_AI_FAVICON_HASH_ENABLED'])
+    settings['HTTP_PROBE_AI_TITLE_DETECTION_ENABLED'] = project.get('httpProbeAiTitleDetectionEnabled', DEFAULT_SETTINGS['HTTP_PROBE_AI_TITLE_DETECTION_ENABLED'])
+    settings['HTTP_PROBE_AI_WAPPALYZER_ENABLED'] = project.get('httpProbeAiWappalyzerEnabled', DEFAULT_SETTINGS['HTTP_PROBE_AI_WAPPALYZER_ENABLED'])
 
     # Wappalyzer
     settings['WAPPALYZER_ENABLED'] = project.get('wappalyzerEnabled', DEFAULT_SETTINGS['WAPPALYZER_ENABLED'])
@@ -1082,6 +1104,8 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
 
     # Subdomain Discovery Tool Toggles
     settings['SUBDOMAIN_DISCOVERY_ENABLED'] = project.get('subdomainDiscoveryEnabled', DEFAULT_SETTINGS['SUBDOMAIN_DISCOVERY_ENABLED'])
+    settings['DOMAIN_RECON_AI_TXT_HINT_ENABLED'] = project.get('domainReconAiTxtHintEnabled', DEFAULT_SETTINGS['DOMAIN_RECON_AI_TXT_HINT_ENABLED'])
+    settings['DOMAIN_RECON_AI_NS_HINT_ENABLED'] = project.get('domainReconAiNsHintEnabled', DEFAULT_SETTINGS['DOMAIN_RECON_AI_NS_HINT_ENABLED'])
     settings['CRTSH_ENABLED'] = project.get('crtshEnabled', DEFAULT_SETTINGS['CRTSH_ENABLED'])
     settings['CRTSH_MAX_RESULTS'] = project.get('crtshMaxResults', DEFAULT_SETTINGS['CRTSH_MAX_RESULTS'])
     settings['HACKERTARGET_ENABLED'] = project.get('hackerTargetEnabled', DEFAULT_SETTINGS['HACKERTARGET_ENABLED'])

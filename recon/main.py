@@ -769,6 +769,33 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
         if "port_scan" in combined_result:
             _graph_update_bg("update_graph_from_port_scan", combined_result, USER_ID, PROJECT_ID)
 
+    # =====================================================================
+    # GROUP 3.5 — Nmap Service Version Detection + NSE Vulnerability Scripts
+    # IP-mode equivalent of the domain-mode block at run_domain_recon().
+    # Without this, Service.product / Service.version / Service.ai_runtime_version
+    # never get populated in IP-mode scans (recon's port_scan only carries
+    # IANA-derived service names, not real banner-read versions).
+    # Depends on: port_scan output. Runs sequentially BEFORE HTTP probe so
+    # http_probe sees the enriched port_details.
+    # =====================================================================
+    nmap_enabled = settings.get('NMAP_ENABLED', True)
+    if nmap_enabled and "port_scan" in combined_result:
+        print(f"\n[*][Pipeline] GROUP 3.5: Nmap Service Detection (IP mode)")
+        print("-" * 40)
+
+        from recon.main_recon_modules.nmap_scan import run_nmap_scan
+        combined_result = run_nmap_scan(combined_result, output_file=output_file, settings=settings)
+        combined_result["metadata"]["modules_executed"].append("nmap_scan")
+
+        # Merge Nmap service versions (incl. ai_runtime_version) into port_scan.port_details
+        if "nmap_scan" in combined_result:
+            merge_nmap_into_port_scan(combined_result)
+
+        save_recon_file(combined_result, output_file)
+
+        if "nmap_scan" in combined_result:
+            _graph_update_bg("update_graph_from_nmap", combined_result, USER_ID, PROJECT_ID)
+
     # OSINT Enrichment (parallel, same logic as domain recon Group 3b)
     _ip_osint_tools = {
         'censys': ('CENSYS_ENABLED', 'recon.main_recon_modules.censys_enrich', 'run_censys_enrichment_isolated', 'update_graph_from_censys'),
@@ -1023,7 +1050,7 @@ def run_domain_recon(target: str, anonymous: bool = False, bruteforce: bool = Fa
             # Use parallel resolve_all_dns for filtered subdomains too
             dns_workers = _settings.get('DNS_MAX_WORKERS', 50)
             dns_record_parallel = _settings.get('DNS_RECORD_PARALLELISM', True)
-            dns_result = resolve_all_dns(root_domain, full_subdomains, max_workers=dns_workers, record_parallelism=dns_record_parallel)
+            dns_result = resolve_all_dns(root_domain, full_subdomains, max_workers=dns_workers, record_parallelism=dns_record_parallel, settings=_settings)
             domain_dns = dns_result["domain"] if include_root else {}
             combined_result["dns"] = {
                 "domain": domain_dns,

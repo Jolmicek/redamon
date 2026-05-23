@@ -220,6 +220,16 @@ export function NaabuSection({ data, updateField, onRun }: NaabuSectionProps) {
                     onChange={(checked) => updateField('naabuPassiveMode', checked)}
                   />
                 </div>
+                <div className={styles.toggleRow}>
+                  <div>
+                    <span className={styles.toggleLabel}>AI Port Catalog</span>
+                    <p className={styles.toggleDescription}>Annotate AI-bearing ports (Ollama 11434, Qdrant 6333, Open WebUI 8080, vLLM, LiteLLM, Triton, Milvus, Gradio, ComfyUI, …) — emits Technology nodes with <code>category=ai-*</code> linked to the Service</p>
+                  </div>
+                  <Toggle
+                    checked={data.portScanAiPortCatalogEnabled ?? true}
+                    onChange={(checked) => updateField('portScanAiPortCatalogEnabled', checked)}
+                  />
+                </div>
               </div>
 
               <div className={styles.fieldGroup}>

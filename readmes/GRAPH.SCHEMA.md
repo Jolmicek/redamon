@@ -2806,6 +2806,95 @@ ORDER BY s.iteration
 
 ---
 
+## 🤖 AI Surface Annotations
+
+The adversarial-AI surface recon (see `internal/ADVERSARIAL_AI/AI_SURFACE_RECON.md`) lands as **property additions on existing nodes** plus new instances on existing labels. **Zero new node labels are introduced.**
+
+### Naming convention — prefix-based discovery
+
+Every property added by the AI recon path carries one of two prefixes so the agent's text-to-cypher path can identify AI annotations *structurally* instead of from an enumerated allow-list:
+
+| Pattern | When | Example |
+|---|---|---|
+| `ai_*` | Non-boolean AI property whose name alone wouldn't make its AI nature obvious | `ai_framework_name`, `ai_runtime_version`, `ai_service_hint`, `ai_frontend_product_guess` |
+| `is_ai_*` | AI boolean classifier (matches the existing `is_*` boolean convention) | `is_ai_framework_detected` |
+| Value-prefixed (no field rename) | The host module already owns a generic field (`Technology.category`, etc.). We add new *values* whose own prefix (`ai-`, `llm-`, `AML.T`) signals the AI nature | `Technology.category="ai-runtime"` |
+
+Once this rule is in the agent's text-to-cypher prompt, future AI properties added by later laps inherit semantic accessibility for free:
+
+```cypher
+// Any node carrying any AI annotation
+MATCH (n) WHERE any(k IN keys(n) WHERE k STARTS WITH 'ai_' OR k STARTS WITH 'is_ai_')
+  AND n.project_id = $pid
+RETURN labels(n) AS label, count(*) AS n
+```
+
+### Property additions (lap 1 — domain_recon + port_scan + http_probe)
+
+| Node label | New property | Type | Written by |
+|---|---|---|---|
+| `Subdomain` | `ai_service_hint` | string (provider name like `"anthropic"`, `"replicate"`, `"huggingface"`, or `"ai-hosting-candidate"`) | `domain_recon` (TXT / NS regex against `AI_TXT_PATTERNS` and `AI_NS_HINT_PATTERNS`) |
+| `Service` | `ai_runtime_version` | string (e.g. `"ollama"`, `"vllm"`, `"litellm"`, `"tgi"`) | `nmap_scan` (regex over nmap product/version field) |
+| `Endpoint` | `is_ai_framework_detected` | bool | `http_probe` (any of: header match, favicon hash hit, title regex hit) |
+| `Endpoint` | `ai_framework_name` | string (e.g. `"langchain"`, `"vllm"`, `"litellm"`) | `http_probe` (header signature winner) |
+| `Endpoint` | `ai_frontend_product_guess` | string (e.g. `"open-webui"`, `"flowise"`, `"gradio"`) | `http_probe` (favicon hash or title regex; favicon wins) |
+
+> **Patch D model split (May 2026)**: AI annotations now live on `Endpoint` rather than `BaseURL`. `BaseURL` was redefined as host-level (`scheme://host:port`) — one per HTTP service — and `Endpoint` carries each probed path's status/headers/title/AI signals. Endpoints reach their parent via `(BaseURL)-[:HAS_ENDPOINT]->(Endpoint)`, or directly via `Endpoint.baseurl` property. The `USES_TECHNOLOGY` edge from `http_probe` also moved to `Endpoint`.
+
+### Value-prefixed reused fields (lap 1)
+
+| Node label | Field (existing) | New AI-prefixed values added | Written by |
+|---|---|---|---|
+| `Technology` | `category` | `ai-framework`, `ai-runtime`, `ai-vector-db`, `ai-proxy`, `ai-sdk-client`, `ai-frontend`, `ai-mlops` (existing non-AI values untouched). `ai-mlops` covers experiment-tracking / observability surfaces: MLflow, Langfuse, Phoenix-Arize, Ray Dashboard, Argilla, AutoGen Studio. | `port_scan` / `http_probe` |
+| `Technology` relationship `:USES_TECHNOLOGY` | `detected_by` | `naabu-ai-port`, `masscan-ai-port`, `httpx-ai-header`, `httpx-ai-favicon`, `httpx-ai-title` | `port_scan` / `masscan_scan` / `http_probe` |
+
+### Relationships reused — no new edge types
+
+- `(Service)-[:USES_TECHNOLOGY]->(Technology)` and `(Port)-[:HAS_TECHNOLOGY]->(Technology)` — existing relationships used by `port_mixin.py`. The AI hook MERGEs new Technology nodes with `category` in `ai-*` and links via the existing relationship type, distinguished by the new `detected_by` property value.
+- `(Endpoint)-[:USES_TECHNOLOGY {confidence, detected_by}]->(Technology)` — existing relationship used by `http_mixin.py`. Patch D moved this edge from `BaseURL` to `Endpoint` so the per-path Technology signal lines up with the per-path AI annotations. The `BaseURL` carries no `USES_TECHNOLOGY` edges from `http_probe`.
+
+### Useful query patterns
+
+```cypher
+// All AI endpoints (Patch D: AI annotations live on Endpoint, BaseURL hosts the service)
+MATCH (b:BaseURL)-[:HAS_ENDPOINT]->(e:Endpoint)
+WHERE e.is_ai_framework_detected = true
+  AND e.project_id = $pid
+RETURN b.url AS base_url, e.path, e.ai_framework_name, e.ai_frontend_product_guess
+
+// AI Technology rollup (frameworks/runtimes/vector-dbs/frontends/proxies)
+MATCH (t:Technology) WHERE t.category STARTS WITH 'ai-'
+  AND t.project_id = $pid
+RETURN t.category, t.name, count(*) AS instances
+
+// Hosts with DNS evidence of an AI provider (before any port/HTTP probe)
+MATCH (s:Subdomain) WHERE s.ai_service_hint IS NOT NULL
+  AND s.project_id = $pid
+RETURN s.name, s.ai_service_hint
+
+// Vector databases exposed (via port_scan AI port catalogue)
+MATCH (svc:Service)-[:USES_TECHNOLOGY]->(t:Technology)
+WHERE t.category = 'ai-vector-db' AND svc.project_id = $pid
+RETURN svc.port, t.name, svc.host
+```
+
+### Properties reserved for later laps
+
+Documented here so the prefix convention stays coherent as later laps land. Empty / `IS NULL` until the relevant lap ships.
+
+| Node label | Reserved property | Lap |
+|---|---|---|
+| `Endpoint` | `ai_interface_type` (`llm-chat`, `llm-completion`, `llm-tool-call`, `llm-embedding`, `sse-stream`, `mcp`, `llm-graphql`) | resource_enum lap |
+| `Endpoint` | `is_ai_rag_ingest`, `ai_tool_schema_ref`, `ai_supports_streaming`, `ai_supports_tools`, `ai_supports_vision`, `ai_model_family_guess`, `ai_latency_p50_ms` | resource_enum / central ai_surface_recon lap |
+| `Parameter` | `is_ai_prompt_injectable`, `ai_tool_arg_path` | resource_enum lap |
+| `Vulnerability` | `ai_owasp_llm_id`, `ai_atlas_technique`, `ai_asr`, `ai_trials`, `ai_oracle_kind`, `ai_payload_class`, `ai_transcript_ref` | vuln_scan / ai_guardrail_probe lap |
+| `CVE` | `is_ai_library` | vuln_scan AI library lookup lap |
+| `Secret` / `TrufflehogFinding` / `GithubSecret` | `ai_provider` | trufflehog / github-secret-hunt AI detector lap |
+| `JsReconFinding` | `finding_type` values `ai-sdk-client`, `ai-sdk-key-literal`, `ai-sdk-browser-allowed`, `ai-frontend-detected` | js_recon AI SDK lap |
+| `MitreData` | `id` starting with `AML.T` | add_mitre ATLAS lap |
+
+---
+
 ## 🔮 Future Extensions (Not Implemented Yet)
 - GVMScan, GVMVulnerability, DetectedProduct, OSFingerprint nodes (GVM integration - designed but not yet created by code; GVM vulns currently stored as Vulnerability nodes with source="gvm"; Traceroute nodes now implemented)
 - `Screenshot` nodes linking to stored images

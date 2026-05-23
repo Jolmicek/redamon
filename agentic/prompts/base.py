@@ -2294,6 +2294,81 @@ LIMIT 500
    - CVE.severity is uppercase: "CRITICAL", "HIGH", "MEDIUM", "LOW"
 8. **Do NOT include user_id/project_id filters** - they are injected automatically
 
+## AI Surface Annotations
+
+Properties whose name starts with `ai_` or `is_ai_` are AI surface annotations
+added by the AI recon modules. They sit on existing node labels (no new labels).
+The same structural prefix rule applies to value-prefixed fields: `ai-`, `llm-`,
+or `AML.T` values on `Technology.category`, `MitreData.id`, etc.
+
+Properties currently written (lap 1 — domain_recon, port_scan, http_probe):
+
+  - Subdomain:    `ai_service_hint` (e.g. "anthropic", "openai", "huggingface",
+                  "replicate", "langchain", "langfuse", "cohere", "together",
+                  "groq", "mistral", "langsmith", or "ai-hosting-candidate"
+                  from a weak NS hint)
+  - Service:      `ai_runtime_version` (e.g. "ollama", "vllm", "litellm",
+                  "tgi", "triton", "llama.cpp" — set by nmap product/version
+                  regex)
+  - Endpoint:     `is_ai_framework_detected` (bool),
+                  `ai_framework_name` (e.g. "vllm", "langchain", "litellm",
+                  "anthropic"),
+                  `ai_frontend_product_guess` (e.g. "open-webui", "librechat",
+                  "flowise", "dify", "gradio", "streamlit")
+                  (Patch D: AI annotations live on Endpoint, not BaseURL.
+                  BaseURL = scheme+host+port. Endpoint = path under a BaseURL.
+                  Reach Endpoint via (BaseURL)-[:HAS_ENDPOINT]->(Endpoint)
+                  or directly by Endpoint.baseurl property.)
+
+Value-prefixed reused fields (lap 1):
+
+  - Technology.category in {"ai-runtime", "ai-vector-db", "ai-framework",
+                            "ai-proxy", "ai-frontend", "ai-sdk-client",
+                            "ai-mlops"}
+                            (existing non-AI Technology rows keep their
+                            original category — the prefix is the AI marker.
+                            "ai-mlops" covers observability / experiment
+                            tracking surfaces: MLflow, Langfuse, Phoenix,
+                            Ray Dashboard, Argilla, AutoGen Studio.)
+  - USES_TECHNOLOGY edge property `detected_by` carries the source:
+    "naabu-ai-port", "masscan-ai-port", "httpx-ai-header",
+    "httpx-ai-favicon", "httpx-ai-title".
+
+Useful AI surface query patterns:
+
+  - "Which endpoints were tagged as AI frameworks":
+      MATCH (b:BaseURL)-[:HAS_ENDPOINT]->(e:Endpoint)
+      WHERE e.is_ai_framework_detected = true
+      RETURN b.url, e.path, e.ai_framework_name, e.ai_frontend_product_guess
+
+  - "Which AI frameworks did we detect" (rollup):
+      MATCH (t:Technology) WHERE t.category STARTS WITH 'ai-'
+      RETURN t.category, t.name, count(*) AS instances
+
+  - "Hosts with DNS evidence of an AI vendor" (no port probe required):
+      MATCH (s:Subdomain) WHERE s.ai_service_hint IS NOT NULL
+      RETURN s.name, s.ai_service_hint
+
+  - "Exposed vector databases":
+      MATCH (svc:Service)-[:USES_TECHNOLOGY]->(t:Technology)
+      WHERE t.category = 'ai-vector-db'
+      RETURN svc.port, t.name
+
+  - "Services running AI runtimes per nmap version regex":
+      MATCH (svc:Service) WHERE svc.ai_runtime_version IS NOT NULL
+      RETURN svc.ai_runtime_version, svc.port, count(*) AS n
+
+  - "Any node carrying any AI annotation" (catch-all):
+      MATCH (n) WHERE any(k IN keys(n)
+        WHERE k STARTS WITH 'ai_' OR k STARTS WITH 'is_ai_')
+      RETURN labels(n) AS label, count(*) AS n
+
+When the user asks about AI endpoints, AI frameworks, exposed LLM services, or
+"what AI did we find", route to these patterns. Future laps (resource_enum,
+vuln_scan, add_mitre, trufflehog AI key detectors) will append more
+`ai_*` / `is_ai_*` fields under this same convention; the structural rule
+covers them.
+
 ## Output Format
 Generate ONLY valid Cypher queries. No explanations, no markdown formatting.
 """

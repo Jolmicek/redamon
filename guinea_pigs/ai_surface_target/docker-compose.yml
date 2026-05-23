@@ -1,0 +1,32 @@
+# RedAmon AI surface recon guinea pig
+#
+# Bring up:    docker compose up -d --build
+# Bring down:  docker compose down
+#
+# The container runs network_mode: host so the recon container (also
+# network_mode: host) reaches the bound ports via 127.0.0.1. This is the
+# same wiring used by agentic/labs/ai-surface/ — bring up only ONE at a
+# time; they collide on ports 11434/8080/8000.
+
+services:
+
+  ai-surface-target:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: redamon-ai-surface-target:latest
+    container_name: redamon-ai-surface-target
+    restart: unless-stopped
+    network_mode: host
+    # Source bind for fast iteration during development. Comment out for
+    # frozen image runs. The CMD already points at /app/server.py inside
+    # the image, so the mount just overlays the source.
+    volumes:
+      - ./server.py:/app/server.py:ro
+      - ./ai_signals.py:/app/ai_signals.py:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 11434)); s.close()\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

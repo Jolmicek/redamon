@@ -33,3 +33,6 @@ paramspider @ git+https://github.com/devanshbatham/ParamSpider.git  # Passive UR
 
 # MITRE enrichment
 # (uses requests - already included above)
+
+# AI surface recon — favicon hashing for AI-frontend product detection
+mmh3>=4.1.0                  # MurmurHash3, used by ai_signal_catalog favicon lookup

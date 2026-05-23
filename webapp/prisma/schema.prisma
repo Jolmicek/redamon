@@ -259,6 +259,8 @@ model Project {
   naabuSkipHostDiscovery      Boolean  @default(true) @map("naabu_skip_host_discovery")
   naabuVerifyPorts            Boolean  @default(true) @map("naabu_verify_ports")
   naabuPassiveMode            Boolean  @default(false) @map("naabu_passive_mode")
+  // AI surface recon — annotate AI-bearing ports (Ollama 11434, Qdrant 6333, Open WebUI 8080, …) on naabu output
+  portScanAiPortCatalogEnabled Boolean @default(true) @map("port_scan_ai_port_catalog_enabled")
 
   // ========== MASSCAN PORT SCANNER ==========
   masscanEnabled              Boolean  @default(true) @map("masscan_enabled")
@@ -269,6 +271,8 @@ model Project {
   masscanWait                 Int      @default(10) @map("masscan_wait")
   masscanRetries              Int      @default(1) @map("masscan_retries")
   masscanExcludeTargets       String   @default("") @map("masscan_exclude_targets")
+  // AI surface recon — same AI port catalogue applied to masscan output
+  masscanAiPortCatalogEnabled Boolean  @default(true) @map("masscan_ai_port_catalog_enabled")
 
   // ========== NMAP SERVICE DETECTION & NSE VULN SCRIPTS ==========
   nmapEnabled                 Boolean  @default(true) @map("nmap_enabled")
@@ -278,6 +282,8 @@ model Project {
   nmapTimeout                 Int      @default(600) @map("nmap_timeout")
   nmapHostTimeout             Int      @default(300) @map("nmap_host_timeout")
   nmapParallelism             Int      @default(5) @map("nmap_parallelism")
+  // AI surface recon — regex nmap product/version strings against AI runtimes (Ollama, vLLM, LiteLLM, TGI, …)
+  nmapAiVersionRegexEnabled   Boolean  @default(true) @map("nmap_ai_version_regex_enabled")
 
   // ========== HTTPX HTTP PROBING ==========
   httpxEnabled                Boolean  @default(true)  @map("httpx_enabled")
@@ -312,6 +318,11 @@ model Project {
   httpxCustomHeaders          String[] @default([]) @map("httpx_custom_headers")
   httpxMatchCodes             String[] @default([]) @map("httpx_match_codes")
   httpxFilterCodes            String[] @default([]) @map("httpx_filter_codes")
+  // AI surface recon — annotate captured response headers / favicon / title against AI vendor catalogues
+  httpProbeAiHeaderScanEnabled     Boolean @default(true) @map("http_probe_ai_header_scan_enabled")
+  httpProbeAiFaviconHashEnabled    Boolean @default(true) @map("http_probe_ai_favicon_hash_enabled")
+  httpProbeAiTitleDetectionEnabled Boolean @default(true) @map("http_probe_ai_title_detection_enabled")
+  httpProbeAiWappalyzerEnabled     Boolean @default(true) @map("http_probe_ai_wappalyzer_enabled")
 
   // ========== WAPPALYZER ==========
   wappalyzerEnabled           Boolean  @default(true) @map("wappalyzer_enabled")
@@ -723,6 +734,10 @@ model Project {
 
   // Subdomain Discovery Master Switch
   subdomainDiscoveryEnabled             Boolean  @default(true)  @map("subdomain_discovery_enabled")
+
+  // AI surface recon hooks inside domain_recon (TXT/NS hint annotation during DNS pass)
+  domainReconAiTxtHintEnabled           Boolean  @default(true)  @map("domain_recon_ai_txt_hint_enabled")
+  domainReconAiNsHintEnabled            Boolean  @default(true)  @map("domain_recon_ai_ns_hint_enabled")
 
   // Subdomain Discovery Tool Toggles
   crtshEnabled                          Boolean  @default(true)  @map("crtsh_enabled")

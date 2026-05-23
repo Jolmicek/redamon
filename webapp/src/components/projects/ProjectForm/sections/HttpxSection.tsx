@@ -352,6 +352,53 @@ export function HttpxSection({ data, updateField, onRun }: HttpxSectionProps) {
           </div>
 
           <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>AI Surface Recon</h3>
+            <p className={styles.fieldHint} style={{ marginBottom: '0.5rem' }}>
+              Annotate captured response data against AI vendor catalogues. All hooks are passive (no extra HTTP traffic) and write to <code>BaseURL.is_ai_framework_detected</code> / <code>ai_framework_name</code> / <code>ai_frontend_product_guess</code>.
+            </p>
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>AI Header Signatures</span>
+                <p className={styles.toggleDescription}>Regex response headers for AI runtime / framework / proxy / SDK-client markers (<code>x-vllm-*</code>, <code>anthropic-ratelimit-*</code>, <code>x-langchain-*</code>, <code>x-litellm-*</code>, <code>cf-aig-*</code>, <code>x-mcp-*</code>, …).</p>
+              </div>
+              <Toggle
+                checked={data.httpProbeAiHeaderScanEnabled ?? true}
+                onChange={(checked) => updateField('httpProbeAiHeaderScanEnabled', checked)}
+              />
+            </div>
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>AI Favicon Hash Lookup</span>
+                <p className={styles.toggleDescription}>Match captured favicon MMH3 hash against the AI frontend catalogue (Open WebUI, LibreChat, Flowise, Dify, Gradio, Streamlit, ComfyUI, …). Requires Favicon Hash above to be enabled.</p>
+              </div>
+              <Toggle
+                checked={data.httpProbeAiFaviconHashEnabled ?? true}
+                onChange={(checked) => updateField('httpProbeAiFaviconHashEnabled', checked)}
+              />
+            </div>
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>AI Title Regex</span>
+                <p className={styles.toggleDescription}>Match page <code>&lt;title&gt;</code> against AI frontend product names. Same products as the favicon catalogue; the title hit fills <code>ai_frontend_product_guess</code> when the favicon hash is unknown.</p>
+              </div>
+              <Toggle
+                checked={data.httpProbeAiTitleDetectionEnabled ?? true}
+                onChange={(checked) => updateField('httpProbeAiTitleDetectionEnabled', checked)}
+              />
+            </div>
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>AI Wappalyzer Fingerprints</span>
+                <p className={styles.toggleDescription}>Local fingerprint additions for AI frameworks (LangChain JS marker, vLLM cookie, TGI route, …). Rides the existing Wappalyzer pass; no extra requests.</p>
+              </div>
+              <Toggle
+                checked={data.httpProbeAiWappalyzerEnabled ?? true}
+                onChange={(checked) => updateField('httpProbeAiWappalyzerEnabled', checked)}
+              />
+            </div>
+          </div>
+
+          <div className={styles.subSection}>
             <h3 className={styles.subSectionTitle}>Response Data</h3>
             <div className={styles.toggleRow}>
               <div>

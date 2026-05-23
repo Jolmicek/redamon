@@ -34,8 +34,11 @@ const SubdomainDiscovery = (
       <li>The Subdomain node is tagged with its resolution state (resolved / unresolved / wildcard) and a discovery timestamp.</li>
       <li>The apex Domain node is enriched with WHOIS data (registrar, organization, country, registration dates) when WHOIS lookup is enabled.</li>
     </ul>
-    <p style={{ ...paraStyle, margin: 0 }}>
+    <p style={paraStyle}>
       Existing nodes are reused (deduplicated) — running the scan again only adds newly discovered subdomains, never duplicates.
+    </p>
+    <p style={{ ...paraStyle, margin: 0 }}>
+      When the <strong>AI TXT/SPF/DKIM Hint</strong> toggle is on, captured TXT records (including SPF/DKIM/DMARC) are regex-matched against the AI vendor catalogue. On match, the Subdomain carries <span style={codeStyle}>ai_service_hint</span> with the provider name (anthropic, openai, huggingface, replicate, langchain, langfuse, …). The <strong>AI NS Hint</strong> toggle is a weaker signal: NS records pointing at Vercel/Netlify/Replit/Modal tag the subdomain as <span style={codeStyle}>ai_service_hint=&quot;ai-hosting-candidate&quot;</span> only when no stronger TXT hint already exists.
     </p>
   </div>
 )
@@ -237,8 +240,11 @@ const Naabu = (
       <li>The IP node is updated with a fresh timestamp.</li>
       <li>The Domain is enriched with a port-scan timestamp and a total count of open ports across the project.</li>
     </ul>
-    <p style={{ ...paraStyle, margin: 0 }}>
+    <p style={paraStyle}>
       Ports are deduplicated by (IP + port number + protocol). The output format is compatible with Masscan, so they can be run interchangeably or sequentially.
+    </p>
+    <p style={{ ...paraStyle, margin: 0 }}>
+      When <strong>AI Port Catalog</strong> is enabled, open ports matching the AI port table (Ollama 11434, Qdrant 6333, Open WebUI 8080, vLLM, LiteLLM, Triton, Milvus, Gradio, ComfyUI, …) also MERGE a <strong>Technology</strong> node with <span style={codeStyle}>category=ai-*</span> linked to the Service via <span style={codeStyle}>:USES_TECHNOLOGY</span> with <span style={codeStyle}>detected_by=naabu-ai-port</span>. Shared ports (8000, 8080) are flagged for disambiguation and only promoted when a corroborating HTTP signal lands.
     </p>
 
     <div style={sectionTitleStyle}>When the scan refuses to start</div>
@@ -266,8 +272,11 @@ const Masscan = (
       <li>Port nodes get product/version/CPE properties from banner analysis.</li>
       <li>The Domain is enriched with a port scan timestamp, the scan type, the scan port configuration, and a total count of open ports.</li>
     </ul>
-    <p style={{ ...paraStyle, margin: 0 }}>
+    <p style={paraStyle}>
       IPs that have no open ports and no hostname associations are skipped to avoid creating orphaned nodes. Existing Port nodes are reused, not duplicated.
+    </p>
+    <p style={{ ...paraStyle, margin: 0 }}>
+      When <strong>AI Port Catalog</strong> is enabled, the same AI port table used by Naabu fires here too — open AI ports also MERGE a <strong>Technology</strong> node with <span style={codeStyle}>category=ai-*</span> linked to the Service via <span style={codeStyle}>:USES_TECHNOLOGY</span> with <span style={codeStyle}>detected_by=masscan-ai-port</span>.
     </p>
   </div>
 )
@@ -297,8 +306,11 @@ const Nmap = (
       <li>If NSE scripts (Nmap's vulnerability scripts) report findings, they become <strong>Vulnerability</strong> nodes linked to the Port, with associated CVE nodes attached.</li>
       <li>The Port is tagged as scanned by Nmap.</li>
     </ul>
-    <p style={{ ...paraStyle, margin: 0 }}>
+    <p style={paraStyle}>
       Runs as long as at least one IP is available (graph or custom). Without ports, falls back to Nmap's default top-ports list.
+    </p>
+    <p style={{ ...paraStyle, margin: 0 }}>
+      When <strong>AI Runtime Version Regex</strong> is enabled, Nmap's <code>product</code>/<code>version</code> strings are matched against AI runtimes (Ollama, vLLM, LiteLLM, TGI, Triton, llama.cpp). On match the Service node also carries <span style={codeStyle}>ai_runtime_version</span>, which downstream CVE lookups can join against AI library CVE clusters.
     </p>
   </div>
 )
@@ -340,8 +352,11 @@ const Httpx = (
       <li>BaseURLs are richly enriched: status code, content type, content length, page title, server header, location header, response time, HTTP version, TLS version, CDN detection, favicon hash.</li>
       <li>Wappalyzer fingerprints become tech-stack data on the BaseURL: framework name + version, CMS name + version. These also feed the CVE Lookup downstream.</li>
     </ul>
-    <p style={{ ...paraStyle, margin: 0 }}>
+    <p style={paraStyle}>
       Live vs dead is determined by status code: anything &lt; 500 is treated as live (4xx counts because the host is responding). 5xx and connection failures are stored but not used as live targets downstream.
+    </p>
+    <p style={{ ...paraStyle, margin: 0 }}>
+      When any of the four <strong>AI Surface Recon</strong> sub-toggles is on, the BaseURL also carries <span style={codeStyle}>is_ai_framework_detected</span>, <span style={codeStyle}>ai_framework_name</span>, and <span style={codeStyle}>ai_frontend_product_guess</span>. The header regex catches runtime / framework / proxy / SDK markers (<code>x-vllm-*</code>, <code>anthropic-ratelimit-*</code>, <code>x-langchain-*</code>, <code>x-litellm-*</code>, <code>cf-aig-*</code>, …). The favicon-hash and title-regex lookups identify AI frontend products (Open WebUI, LibreChat, Flowise, Dify, Gradio, …). Matching <strong>Technology</strong> nodes with <span style={codeStyle}>category=ai-*</span> are linked to the BaseURL via <span style={codeStyle}>:USES_TECHNOLOGY {`{detected_by: 'httpx-ai-*'}`}</span>.
     </p>
 
     <div style={sectionTitleStyle}>When the scan refuses to start</div>

@@ -33,6 +33,9 @@ export const reconPresetSchema = z.object({
 
   // -- Subdomain Discovery --
   subdomainDiscoveryEnabled: bool,
+  // AI surface recon hooks inside domain_recon (TXT/NS hint annotation during DNS pass)
+  domainReconAiTxtHintEnabled: bool,
+  domainReconAiNsHintEnabled: bool,
   crtshEnabled: bool,
   crtshMaxResults: int,
   hackerTargetEnabled: bool,
@@ -66,6 +69,8 @@ export const reconPresetSchema = z.object({
   naabuSkipHostDiscovery: bool,
   naabuVerifyPorts: bool,
   naabuPassiveMode: bool,
+  // AI surface recon — annotate AI-bearing ports on naabu output
+  portScanAiPortCatalogEnabled: bool,
 
   // -- Port Scanning: Masscan --
   masscanEnabled: bool,
@@ -76,6 +81,8 @@ export const reconPresetSchema = z.object({
   masscanWait: int,
   masscanRetries: int,
   masscanExcludeTargets: str,
+  // AI surface recon — same AI port catalogue applied to masscan output
+  masscanAiPortCatalogEnabled: bool,
 
   // -- Port Scanning: Nmap --
   nmapEnabled: bool,
@@ -85,6 +92,8 @@ export const reconPresetSchema = z.object({
   nmapTimeout: int,
   nmapHostTimeout: int,
   nmapParallelism: int,
+  // AI surface recon — regex nmap product/version strings against AI runtimes
+  nmapAiVersionRegexEnabled: bool,
 
   // -- HTTP Probing: httpx --
   httpxEnabled: bool,
@@ -118,6 +127,11 @@ export const reconPresetSchema = z.object({
   httpxCustomHeaders: strArr,
   httpxMatchCodes: strArr,
   httpxFilterCodes: strArr,
+  // AI surface recon — annotate captured response data against AI vendor catalogues
+  httpProbeAiHeaderScanEnabled: bool,
+  httpProbeAiFaviconHashEnabled: bool,
+  httpProbeAiTitleDetectionEnabled: bool,
+  httpProbeAiWappalyzerEnabled: bool,
 
   // -- Wappalyzer --
   wappalyzerEnabled: bool,
@@ -451,6 +465,8 @@ export const RECON_PARAMETER_CATALOG = `
 
 ## Subdomain Discovery
 - subdomainDiscoveryEnabled: boolean - Master switch for subdomain discovery
+- domainReconAiTxtHintEnabled: boolean - Regex TXT/SPF/DKIM/DMARC records for AI vendor domains (anthropic.com, openai.com, huggingface.co, replicate.com, langchain.com, langfuse.com, …) and set Subdomain.ai_service_hint
+- domainReconAiNsHintEnabled: boolean - Tag Subdomain.ai_service_hint="ai-hosting-candidate" when NS records point at AI-friendly hosts (Vercel, Netlify, Replit, Modal, HuggingFace Spaces). Weak signal; never overrides a TXT hint.
 - crtshEnabled: boolean - Query crt.sh certificate transparency
 - crtshMaxResults: integer
 - hackerTargetEnabled: boolean - Query HackerTarget
@@ -484,6 +500,7 @@ export const RECON_PARAMETER_CATALOG = `
 - naabuSkipHostDiscovery: boolean
 - naabuVerifyPorts: boolean
 - naabuPassiveMode: boolean - Use Shodan InternetDB instead of active scan
+- portScanAiPortCatalogEnabled: boolean - Annotate AI-bearing ports (Ollama 11434, Qdrant 6333, Open WebUI 8080, vLLM, LiteLLM, Triton, Milvus, …) on naabu output and MERGE Technology(category=ai-*) nodes
 
 ## Port Scanning - Masscan
 - masscanEnabled: boolean - Run Masscan
@@ -494,6 +511,7 @@ export const RECON_PARAMETER_CATALOG = `
 - masscanWait: integer - Wait time in seconds
 - masscanRetries: integer
 - masscanExcludeTargets: string - Comma-separated targets to exclude
+- masscanAiPortCatalogEnabled: boolean - Same AI port catalogue applied to masscan output (uses the same catalogue as portScanAiPortCatalogEnabled)
 
 ## Port Scanning - Nmap
 - nmapEnabled: boolean - Run Nmap service detection
@@ -503,6 +521,7 @@ export const RECON_PARAMETER_CATALOG = `
 - nmapTimeout: integer - Timeout in seconds
 - nmapHostTimeout: integer - Per-host timeout in seconds
 - nmapParallelism: integer - IPs scanned concurrently by Nmap
+- nmapAiVersionRegexEnabled: boolean - Regex nmap product/version strings against AI runtimes (Ollama, vLLM, LiteLLM, TGI, Triton, llama.cpp) and set Service.ai_runtime_version
 
 ## HTTP Probing - httpx
 - httpxEnabled: boolean - Run httpx HTTP prober
@@ -536,6 +555,10 @@ export const RECON_PARAMETER_CATALOG = `
 - httpxCustomHeaders: string[] - Custom HTTP headers
 - httpxMatchCodes: string[] - Only show responses with these status codes
 - httpxFilterCodes: string[] - Hide responses with these status codes
+- httpProbeAiHeaderScanEnabled: boolean - Regex captured response headers for AI runtime/framework/proxy/SDK-client markers (x-vllm-*, anthropic-ratelimit-*, x-langchain-*, x-litellm-*, cf-aig-*, x-mcp-*, …) and set BaseURL.is_ai_framework_detected / ai_framework_name
+- httpProbeAiFaviconHashEnabled: boolean - Match captured favicon MMH3 hash against the AI frontend catalogue (Open WebUI, LibreChat, Flowise, Dify, Gradio, Streamlit, ComfyUI, …) and set BaseURL.ai_frontend_product_guess
+- httpProbeAiTitleDetectionEnabled: boolean - Regex page title against AI frontend products; fills BaseURL.ai_frontend_product_guess when favicon hash is unknown
+- httpProbeAiWappalyzerEnabled: boolean - Local Wappalyzer fingerprint additions for AI frameworks (LangChain JS marker, vLLM cookie, TGI route, …); rides existing Wappalyzer pass
 
 ## Technology Fingerprinting - Wappalyzer
 - wappalyzerEnabled: boolean

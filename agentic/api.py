@@ -1152,10 +1152,38 @@ class TradecraftVerifyRequest(BaseModel):
     force: bool = False
 
 
+_CUSTOM_PROVIDER_TYPES = ("openai_compatible", "bedrock_custom", "ollama_local")
+
+
+def _pick_custom_provider(user_providers: list, model_name: str) -> Optional[dict]:
+    """Return the custom-provider record that should serve this request, if any.
+
+    Resolution order:
+      1. If `model_name` is `custom/<id>`, look up that exact provider id.
+      2. Otherwise, the first provider whose providerType is custom.
+    Returns None when no custom provider is configured.
+    """
+    if model_name and model_name.startswith("custom/"):
+        wanted_id = model_name[len("custom/"):]
+        for p in user_providers or []:
+            if p.get("id") == wanted_id:
+                return p
+    for p in user_providers or []:
+        if p.get("providerType") in _CUSTOM_PROVIDER_TYPES:
+            return p
+    return None
+
+
 def _build_llm_for_user(user_id: Optional[str]):
     """Build an LLM for a non-project endpoint by loading the user's providers
     via the internal webapp API. Falls back to env-based providers when user_id
-    is missing or the lookup fails."""
+    is missing or the lookup fails.
+
+    When the user has only a custom (OpenAI-compatible / bedrock_custom /
+    ollama_local) provider configured, this honors it instead of falling back
+    to the global default model — otherwise the call would crash trying to
+    instantiate an Anthropic client with no key.
+    """
     import os
     import requests
     from orchestrator_helpers.llm_setup import setup_llm, _resolve_provider_key
@@ -1178,6 +1206,15 @@ def _build_llm_for_user(user_id: Optional[str]):
             user_providers = resp.json() or []
         except Exception as e:
             logger.warning(f"tradecraft verify: failed to fetch user LLM providers: {e}")
+
+    custom_provider = _pick_custom_provider(user_providers, model_name)
+    if custom_provider:
+        custom_model = f"custom/{custom_provider.get('id', '')}"
+        logger.info(
+            f"tradecraft verify: using custom provider id={custom_provider.get('id')} "
+            f"type={custom_provider.get('providerType')}"
+        )
+        return setup_llm(custom_model, custom_llm_config=custom_provider)
 
     openai_p = _resolve_provider_key(user_providers, "openai")
     anthropic_p = _resolve_provider_key(user_providers, "anthropic")

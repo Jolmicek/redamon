@@ -34,7 +34,141 @@ import sys
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# AI surface recon — header / favicon / title catalogues
+# NOTE: import the module (not the names) so favicon-hash test patching of
+# AI_FAVICON_HASHES propagates through. The module-attribute access pattern
+# `_ai_catalog.AI_FAVICON_HASHES` always reads the current dict object.
+from helpers import ai_signal_catalog as _ai_catalog
+from helpers.ai_signal_catalog import (
+    AI_HEADER_PATTERNS,
+    match_ai_title,
+    match_ai_body_fingerprint,
+)
+
 # Settings are passed from main.py to avoid multiple database queries
+
+
+def _annotate_ai_http_signals(url_entry: dict, settings: dict | None) -> dict:
+    """Apply AI surface recon to a per-URL entry built by ``parse_httpx_output``.
+
+    Mutates ``url_entry`` in place by setting any of:
+
+      - ``is_ai_framework_detected: True`` and ``ai_framework_name`` when any
+        captured response header matches the AI header catalogue
+      - ``ai_frontend_product_guess`` when the favicon mmh3 hash matches a
+        known AI frontend (Open WebUI, LibreChat, Gradio, …) — favicon wins
+        over title when both fire
+      - ``ai_framework_name`` (category-tagged via the helper return) is also
+        promoted to a Technology MERGE in the graph mixin
+
+    Each of the four sub-features is gated by its own toggle. Returns a
+    summary dict describing which signals fired (used for log counters and
+    test introspection). No-op when ``settings`` is None.
+    """
+    fired = {"header": None, "favicon": None, "title": None, "wappalyzer": None}
+    if settings is None:
+        return fired
+
+    # ---- Header signature scan -------------------------------------------------
+    if settings.get("HTTP_PROBE_AI_HEADER_SCAN_ENABLED", True):
+        headers = url_entry.get("headers")
+        header_names: list[str] = []
+        if isinstance(headers, dict):
+            header_names = list(headers.keys())
+        elif isinstance(headers, str):
+            # httpx sometimes stores headers as a single CRLF-joined string.
+            for line in headers.split("\n"):
+                if ":" in line:
+                    header_names.append(line.split(":", 1)[0].strip())
+
+        # Normalise header names for matching: httpx (and the recon's parser)
+        # converts HTTP header names from dash-form (`x-vllm-cache-hit`) to
+        # underscore-form (`x_vllm_cache_hit`) when serialising. The catalog
+        # regexes use the standard dash-form, so we normalise back to dashes
+        # before matching. Without this the AI header hook silently never
+        # fires in production (caught in scan #3 graph audit).
+        normalised_header_names = [n.replace("_", "-") for n in header_names]
+
+        # Iterate patterns in catalogue order (not header order). The plan's
+        # "first-wins" rule is deterministic by AI_HEADER_PATTERNS position —
+        # runtime markers (vllm/tgi/…) outrank framework markers (langchain)
+        # which outrank proxy/sdk-client markers. Iterating header dict order
+        # would make the priority depend on httpx's serialisation.
+        for pattern, framework, category in AI_HEADER_PATTERNS:
+            if any(pattern.search(name) for name in normalised_header_names):
+                url_entry["is_ai_framework_detected"] = True
+                url_entry["ai_framework_name"] = framework
+                url_entry["ai_framework_category"] = category
+                fired["header"] = framework
+                break
+
+    # ---- Favicon hash lookup ---------------------------------------------------
+    # Favicon wins over title when both fire — it's the stronger structural
+    # signal — so we evaluate it first and let title only fill the field if
+    # favicon didn't already.
+    if settings.get("HTTP_PROBE_AI_FAVICON_HASH_ENABLED", True):
+        favicon = url_entry.get("favicon_hash")
+        favicon_int: int | None = None
+        if isinstance(favicon, int):
+            favicon_int = favicon
+        elif isinstance(favicon, str):
+            try:
+                favicon_int = int(favicon)
+            except (TypeError, ValueError):
+                favicon_int = None
+        if favicon_int is not None:
+            # Module-attribute access so monkey-patched catalogue is picked up
+            product = _ai_catalog.AI_FAVICON_HASHES.get(favicon_int)
+            if product:
+                url_entry["ai_frontend_product_guess"] = product
+                fired["favicon"] = product
+
+    # ---- Title regex catalogue -------------------------------------------------
+    if settings.get("HTTP_PROBE_AI_TITLE_DETECTION_ENABLED", True):
+        title_product = match_ai_title(url_entry.get("title") or "")
+        if title_product and "ai_frontend_product_guess" not in url_entry:
+            url_entry["ai_frontend_product_guess"] = title_product
+            fired["title"] = title_product
+
+    # When any of the three signals tagged a frontend product but no header
+    # match supplied a category, default the BaseURL category to ai-frontend
+    # so the mixin can MERGE the Technology with the right classification.
+    if url_entry.get("ai_frontend_product_guess") and "ai_framework_category" not in url_entry:
+        url_entry["ai_framework_category"] = "ai-frontend"
+        url_entry.setdefault("ai_framework_name", url_entry["ai_frontend_product_guess"])
+        url_entry["is_ai_framework_detected"] = True
+
+    # ---- Wappalyzer AI body fingerprints ---------------------------------------
+    # Lightweight Wappalyzer-style regex catalogue against the captured response
+    # body (LangChain JS globals, Gradio <gradio-app> tag, TGI /generate_stream,
+    # vllm_session cookie literal, etc.). Only runs if the toggle is on AND
+    # httpx captured the body. Skipped on very large bodies to bound cost.
+    if settings.get("HTTP_PROBE_AI_WAPPALYZER_ENABLED", True):
+        body = url_entry.get("body") or ""
+        # 512 KB cap — fingerprint regexes are anchored on early markers so a
+        # truncated body still catches them; an enormous body would otherwise
+        # dominate the per-URL annotation cost.
+        if body and len(body) <= 512 * 1024:
+            match = match_ai_body_fingerprint(body)
+            if match is not None:
+                framework, category = match
+                # Body fingerprint is a corroborating signal — it sets the
+                # framework / category fields ONLY when header/favicon/title
+                # haven't already won. This keeps the strongest signal's
+                # provenance intact.
+                if "ai_framework_name" not in url_entry:
+                    url_entry["ai_framework_name"] = framework
+                    url_entry["ai_framework_category"] = category
+                    url_entry["is_ai_framework_detected"] = True
+                fired["wappalyzer"] = framework
+            else:
+                fired["wappalyzer"] = None
+        else:
+            fired["wappalyzer"] = None
+    else:
+        fired["wappalyzer"] = None
+
+    return fired
 
 
 # =============================================================================
@@ -605,6 +739,12 @@ def build_httpx_command(targets_file: str, output_file: str, settings: dict, use
     # Build Docker command
     cmd = [
         "docker", "run", "--rm",
+        # --net=host so httpx can reach loopback targets (e.g. local test labs
+        # at 127.0.0.1). Without it, the spawned httpx container runs on the
+        # default Docker bridge where 127.0.0.1 == httpx itself, not the host.
+        # Real-world public scans still work — host network can route to any
+        # external IP. Same pattern naabu uses.
+        "--net=host",
         # Note: Don't use -i (interactive) when reading from file, causes deadlock
         "-v", f"{targets_host_path}:/targets:ro",
         "-v", f"{output_host_path}:/output",
@@ -688,9 +828,13 @@ def build_httpx_command(targets_file: str, output_file: str, settings: dict, use
         cmd.append("-cdn")
 
     # Additional paths
+    # httpx's `-path` flag is single-value (last wins) when repeated, but
+    # accepts a comma-separated string for multiple paths. Repeating the
+    # flag silently collapses to the last path — a pre-existing bug that
+    # broke every multi-path scan, including the AI surface lab's
+    # /header/* + /title/* showroom. Join with commas so all paths probe.
     if HTTPX_PATHS:
-        for path in HTTPX_PATHS:
-            cmd.extend(["-path", path])
+        cmd.extend(["-path", ",".join(HTTPX_PATHS)])
 
     # Custom headers
     if HTTPX_CUSTOM_HEADERS:
@@ -714,10 +858,10 @@ def build_httpx_command(targets_file: str, output_file: str, settings: dict, use
 # Result Parsing
 # =============================================================================
 
-def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts: list = None) -> Dict:
+def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts: list = None, settings: dict = None) -> Dict:
     """
     Parse httpx JSON Lines output into structured format.
-    
+
     Args:
         output_file: Path to httpx JSON Lines output file
         root_domain: Target root domain for filtering redirects (e.g., "vulnweb.com")
@@ -725,6 +869,10 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
         allowed_hosts: List of specific allowed hostnames (from filtered mode).
                       If provided, only URLs matching these exact hosts are included.
                       If None (full discovery mode), any host within root_domain is allowed.
+        settings: Optional settings dict; when provided, AI surface recon
+                  annotation runs against each captured URL entry (gated by
+                  HTTP_PROBE_AI_HEADER_SCAN_ENABLED / FAVICON_HASH_ENABLED /
+                  TITLE_DETECTION_ENABLED / WAPPALYZER_ENABLED).
 
     Returns:
         Structured dictionary with by_url, by_host, technologies_found, and summary
@@ -735,6 +883,7 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
     servers_found = {}
     filtered_count = 0  # Track URLs filtered out due to domain/host mismatch
     external_domain_entries = []  # Collect out-of-scope domains for situational awareness
+    ai_summary: dict = {}  # AI surface recon counters: {header_matches, favicon_matches, title_matches, wappalyzer_matches}
 
     if not Path(output_file).exists():
         return {
@@ -838,6 +987,17 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
             if entry.get("body"):
                 url_entry["body"] = entry.get("body")
 
+            # AI surface recon: annotate header / favicon / title / wappalyzer
+            ai_fired = _annotate_ai_http_signals(url_entry, settings)
+            if ai_fired.get("header"):
+                ai_summary["header_matches"] = ai_summary.get("header_matches", 0) + 1
+            if ai_fired.get("favicon"):
+                ai_summary["favicon_matches"] = ai_summary.get("favicon_matches", 0) + 1
+            if ai_fired.get("title"):
+                ai_summary["title_matches"] = ai_summary.get("title_matches", 0) + 1
+            if ai_fired.get("wappalyzer"):
+                ai_summary["wappalyzer_matches"] = ai_summary.get("wappalyzer_matches", 0) + 1
+
             # Add to by_url
             by_url[url] = url_entry
 
@@ -914,7 +1074,12 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
         "cdn_hosts": len([h for h in by_host.values() if any(
             by_url.get(u, {}).get("is_cdn") for u in h.get("urls", [])
         )]),
-        "filtered_out_of_scope": filtered_count  # URLs filtered due to redirect outside target domain
+        "filtered_out_of_scope": filtered_count,  # URLs filtered due to redirect outside target domain
+        # AI surface recon counters (zero when settings is None / toggles off)
+        "ai_header_matches":     ai_summary.get("header_matches", 0),
+        "ai_favicon_matches":    ai_summary.get("favicon_matches", 0),
+        "ai_title_matches":      ai_summary.get("title_matches", 0),
+        "ai_wappalyzer_matches": ai_summary.get("wappalyzer_matches", 0),
     }
 
     return {
@@ -1577,12 +1742,23 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
             if allowed_hosts:
                 print(f"[*][httpx] Filtering to allowed hosts: {', '.join(allowed_hosts)}")
         
-        results = parse_httpx_output(str(httpx_output), root_domain=root_domain, allowed_hosts=allowed_hosts)
-        
+        results = parse_httpx_output(str(httpx_output), root_domain=root_domain, allowed_hosts=allowed_hosts, settings=settings)
+
         # Log if any URLs were filtered out
         filtered_count = results.get("summary", {}).get("filtered_out_of_scope", 0)
         if filtered_count > 0:
             print(f"[*][httpx] Filtered {filtered_count} URL(s) outside target scope")
+
+        # Log AI surface recon hit counts
+        ai_summary = results.get("summary", {})
+        if any(ai_summary.get(k) for k in ("ai_header_matches", "ai_favicon_matches", "ai_title_matches", "ai_wappalyzer_matches")):
+            print(
+                f"[+][httpx] AI surface matches — "
+                f"headers={ai_summary.get('ai_header_matches', 0)}, "
+                f"favicons={ai_summary.get('ai_favicon_matches', 0)}, "
+                f"titles={ai_summary.get('ai_title_matches', 0)}, "
+                f"wappalyzer={ai_summary.get('ai_wappalyzer_matches', 0)}"
+            )
 
         # Build final structure
         httpx_results = {

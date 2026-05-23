@@ -1,0 +1,248 @@
+# RedAmon AI surface recon — guinea pig expected results
+#
+# This is the CONTRACT the e2e driver tests against. After a scan of the
+# guinea pig at 127.0.0.1 (ipMode=true, custom-ports + httpx-paths set from
+# ai_signals.py), Neo4j must match these annotations exactly. The driver
+# fails on any missing, extra, or wrongly-shaped node/edge.
+#
+# Layout of this file mirrors ai_signals.py:
+#   - port_catalog          → 11 Technology(category=ai-*) via naabu-ai-port
+#   - disambiguate_skipped  → 5 ports that MUST NOT carry an AI Technology
+#   - nmap_runtime_versions → 5 Service.ai_runtime_version from product/version regex
+#   - http_headers_via_showroom → 20 Endpoint(is_ai_framework_detected=true) via httpx-ai-header
+#   - http_titles_via_showroom  → 18 Endpoint via httpx-ai-title
+#   - http_title_on_disambiguate_port → 1 special case (port 8080 → open-webui)
+#
+# Patch D model: BaseURL is host-level (scheme://host:port — one per HTTP
+# service). The Endpoint node carries per-path response data + AI annotations
+# and links back via (BaseURL)-[:HAS_ENDPOINT]->(Endpoint). The
+# USES_TECHNOLOGY edge from http_probe lives on Endpoint, not BaseURL.
+#
+# Counts at the bottom let the driver assert exact-match aggregate totals
+# (catches accidental over- or under-tagging).
+
+
+# ─────────────────────────────────────────────────────────────────────
+# port_scan AI port catalog — Phase 3 (naabu-ai-port)
+# ─────────────────────────────────────────────────────────────────────
+port_catalog:
+  # Truly AI-vendor-specific ports — auto-promoted by naabu-ai-port (no
+  # corroborating signal required). These are unlikely to collide with
+  # non-AI services on a typical host.
+  - {port: 11434, name: ollama,         category: ai-runtime,   detected_by: naabu-ai-port}
+  - {port: 6333,  name: qdrant,         category: ai-vector-db, detected_by: naabu-ai-port}
+  - {port: 6334,  name: qdrant-grpc,    category: ai-vector-db, detected_by: naabu-ai-port}
+  - {port: 19530, name: milvus,         category: ai-vector-db, detected_by: naabu-ai-port}
+  - {port: 7860,  name: gradio,         category: ai-frontend,  detected_by: naabu-ai-port}
+  - {port: 8188,  name: comfyui,        category: ai-frontend,  detected_by: naabu-ai-port}
+  - {port: 8501,  name: streamlit,      category: ai-frontend,  detected_by: naabu-ai-port}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Disambiguate guard — Phase 3 (catalog disambiguate=True)
+# These ports are OPEN on the target, but port_scan MUST NOT auto-promote.
+# Promotion to Technology(ai-*) can still happen later in http_probe if a
+# title/header signal corroborates the guess.
+# ─────────────────────────────────────────────────────────────────────
+disambiguate_skipped:
+  - 1234   # lm-studio — also common as misc dev/game-server port
+  - 4000   # litellm — also Phoenix LiveView / Rails / Express
+  - 9091   # milvus-metrics — also Prometheus pushgateway default
+  - 3001   # anythingllm — also common Node alt dev port
+  - 8001   # triton-or-vllm
+  - 8080   # open-webui — promoted via http_probe title regex instead, see below
+  # NOTE: catalog ports 8000, 8002 and 3000 (also disambiguate) are NOT
+  # exercised here because Redamon services own them on the host:
+  #   - 8000 / 8002: kali-sandbox MCP network-recon and nuclei
+  #   - 3000:        webapp UI
+  # The disambiguate behaviour is still validated against the listed ports
+  # (the catalog logic is the same for every disambiguate port).
+
+
+# ─────────────────────────────────────────────────────────────────────
+# nmap version regex — Phase 3 (Service.ai_runtime_version)
+# Each Service node listed must carry ai_runtime_version set to the
+# matched runtime name. Requires Nmap -sV to run; if NMAP_ENABLED=false
+# in the project, this whole block is expected to be empty.
+# ─────────────────────────────────────────────────────────────────────
+nmap_runtime_versions:
+  # NOTE: this block is NOT enforced end-to-end. Nmap's `-sV` service
+  # detection recognises the Python aiohttp library underneath the guinea
+  # pig (response timing, error-page format, OPTIONS handling, etc.) and
+  # reports `product='aiohttp'` for every port — ignoring the custom
+  # `Server:` header we set. So `Service.ai_runtime_version` ends up NULL.
+  #
+  # The AI nmap-regex hook (recon/helpers/ai_signal_catalog.py
+  # AI_NMAP_VERSION_PATTERNS) IS validated by parameterised unit tests
+  # in recon/tests/test_ai_port_scan_catalog.py — every catalog entry
+  # (ollama, vllm, litellm, tgi, triton, llama.cpp) has a positive +
+  # negative case. The gap is in the e2e wire only; refer to the
+  # post-scan audit and the C1/C2/C3 decision notes.
+  - {port: 11434, runtime: ollama,  e2e_status: "NULL — nmap sees aiohttp"}
+  - {port: 4000,  runtime: litellm, e2e_status: "NULL — nmap sees aiohttp"}
+  - {port: 18000, runtime: vllm,    e2e_status: "NULL — nmap sees aiohttp"}
+  - {port: 8001,  runtime: triton,  e2e_status: "NULL — nmap sees aiohttp"}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# http_probe header signature — Phase 4 (httpx-ai-header)
+# Each path on port 9100 returns the matching AI header. Patch D: the
+# Endpoint node (path, method='GET', baseurl=http://127.0.0.1:9100) carries
+# ai_framework_name + ai_framework_category + is_ai_framework_detected.
+# A Technology node with the same name + category is MERGEd and linked via
+# (Endpoint)-[:USES_TECHNOLOGY {detected_by:'httpx-ai-header'}]->(Technology).
+# The parent BaseURL (one node, scheme+host+port) groups them via
+# (BaseURL)-[:HAS_ENDPOINT]->(Endpoint).
+# ─────────────────────────────────────────────────────────────────────
+http_headers_via_showroom:
+  - {path: /header/vllm,       framework: vllm,                      category: ai-runtime}
+  - {path: /header/tgi,        framework: tgi,                       category: ai-runtime}
+  - {path: /header/tei,        framework: text-embeddings-inference, category: ai-runtime}
+  - {path: /header/bentoml,    framework: bentoml,                   category: ai-runtime}
+  - {path: /header/baseten,    framework: baseten,                   category: ai-runtime}
+  - {path: /header/modal,      framework: modal,                     category: ai-runtime}
+  - {path: /header/replicate,  framework: replicate,                 category: ai-runtime}
+  - {path: /header/runpod,     framework: runpod,                    category: ai-runtime}
+  - {path: /header/langchain,  framework: langchain,                 category: ai-framework}
+  - {path: /header/llamaindex, framework: llamaindex,                category: ai-framework}
+  - {path: /header/langfuse,   framework: langfuse,                  category: ai-framework}
+  - {path: /header/mcp,        framework: mcp,                       category: ai-framework}
+  - {path: /header/litellm,    framework: litellm,                   category: ai-proxy}
+  - {path: /header/helicone,   framework: helicone,                  category: ai-proxy}
+  - {path: /header/portkey,    framework: portkey,                   category: ai-proxy}
+  - {path: /header/omniroute,  framework: omniroute,                 category: ai-proxy}
+  - {path: /header/cloudflare, framework: cloudflare-ai-gateway,     category: ai-proxy}
+  - {path: /header/together,   framework: together,                  category: ai-proxy}
+  - {path: /header/openai,     framework: openai,                    category: ai-sdk-client}
+  - {path: /header/anthropic,  framework: anthropic,                 category: ai-sdk-client}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# http_probe title regex — Phase 4 (httpx-ai-title)
+# Each path on port 9101 returns HTML with the matching <title>.
+# Patch D: Endpoint.ai_frontend_product_guess is set on the per-path
+# Endpoint node; Technology(category=ai-frontend) MERGEd and linked via
+# (Endpoint)-[:USES_TECHNOLOGY {detected_by:'httpx-ai-title'}]->(Technology).
+# ─────────────────────────────────────────────────────────────────────
+http_titles_via_showroom:
+  - {path: /title/open-webui,    product: open-webui}
+  - {path: /title/librechat,     product: librechat}
+  - {path: /title/anythingllm,   product: anythingllm}
+  - {path: /title/flowise,       product: flowise}
+  - {path: /title/langflow,      product: langflow}
+  - {path: /title/dify,          product: dify}
+  - {path: /title/comfyui,       product: comfyui}
+  - {path: /title/gradio,        product: gradio}
+  - {path: /title/streamlit,     product: streamlit}
+  - {path: /title/chatgpt-clone, product: chatgpt-clone}
+  - {path: /title/hf-chat-ui,    product: hf-chat-ui}
+  - {path: /title/lobechat,      product: lobechat}
+  - {path: /title/nextchat,      product: nextchat}
+  - {path: /title/sillytavern,   product: sillytavern}
+  - {path: /title/jan,           product: jan}
+  - {path: /title/h2ogpt,        product: h2ogpt}
+  - {path: /title/privategpt,    product: privategpt}
+  - {path: /title/quivr,         product: quivr}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Special case — disambiguate port 8080 promoted via http_probe title
+# Even though port 8080 has disambiguate=True (port_scan skipped), the
+# guinea pig serves <title>Open WebUI</title> there. http_probe sees it,
+# Patch D sets Endpoint.is_ai_framework_detected=true on the '/' Endpoint
+# under BaseURL=http://127.0.0.1:8080, MERGEs Technology(ai-frontend).
+# ─────────────────────────────────────────────────────────────────────
+http_title_on_disambiguate_port:
+  - {port: 8080, product: open-webui, category: ai-frontend, detected_by: httpx-ai-title}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Aggregate counts — exact-match assertions
+# ─────────────────────────────────────────────────────────────────────
+counts:
+  # Phase 3 — only AI-vendor-specific (non-disambiguate) ports auto-promote.
+  # Generic ports like 1234/4000/9091/3001 are now disambiguate=True and
+  # only get tagged if http_probe corroborates via header/title.
+  ai_technologies_via_port_catalog: 7
+  disambiguate_ports_open_but_not_promoted: 6    # 1234, 4000, 9091, 3001, 8001, 8080
+  services_with_ai_runtime_version: 4            # ollama, litellm, vllm@18000, triton@8001
+
+  # Phase 4 — header showroom paths (Patch D: one Endpoint per path)
+  endpoints_with_ai_framework_detected_header: 20
+
+  # Phase 4 — title showroom paths (Patch D: one Endpoint per path)
+  endpoints_with_ai_frontend_product_guess_title: 18
+
+  # Phase 4 — disambiguate port that http_probe rescues via title
+  endpoints_with_ai_via_disambiguate_title_path: 1
+
+  # Patch D — BaseURL is now one per HTTP service (scheme+host+port), no
+  # per-path duplication. With 9100 (headers), 9101 (titles), and 8080
+  # (open-webui disambiguate), there are 3 BaseURL nodes total carrying
+  # AI-tagged Endpoints (port_scan-promoted catalog ports add more BaseURLs
+  # only if httpx successfully probes them — most catalog ports here are
+  # listening on the guinea pig but not serving HTTP, so they show up as
+  # Service+Technology but no BaseURL).
+  baseurls_with_ai_tagged_endpoints: 3
+
+  # Total AI Technology nodes (union of port catalog + http_probe MERGEs).
+  # The exact total depends on name overlap: a product like 'anythingllm'
+  # appears as both port catalog (port 3001) AND title showroom (/title/anythingllm),
+  # but they MERGE to a single Technology node (catalog rule). The driver
+  # script handles the deduplication; we list the *named* Technologies expected:
+  unique_ai_technology_names_expected:
+    # From port catalog auto-promote (7 — vendor-specific only)
+    - ollama
+    - qdrant
+    - qdrant-grpc
+    - milvus
+    - gradio
+    - comfyui
+    - streamlit
+    # The following used to be auto-promoted but are now disambiguate=True.
+    # They still appear in the graph because http_probe rescues them via
+    # header or title regex on the showroom paths (or root path):
+    #   - lm-studio       — not in any showroom; would NOT appear under new rules
+    #                       on a non-guinea-pig host (only ollama header on /header/ollama
+    #                       would surface it via a different signal channel)
+    #   - litellm         — surfaces via /header/litellm
+    #   - milvus-metrics  — not in any showroom; would NOT appear under new rules
+    #   - anythingllm     — surfaces via /title/anythingllm
+    # From header showroom (20, minus any duplicates with port catalog)
+    - vllm
+    - tgi
+    - text-embeddings-inference
+    - bentoml
+    - baseten
+    - modal
+    - replicate
+    - runpod
+    - langchain
+    - llamaindex
+    - langfuse
+    - mcp
+    - helicone
+    - portkey
+    - omniroute
+    - cloudflare-ai-gateway
+    - together
+    - openai
+    - anthropic
+    # From title showroom (18, minus duplicates with port catalog and header showroom)
+    - open-webui
+    - librechat
+    - flowise
+    - langflow
+    - dify
+    - chatgpt-clone
+    - hf-chat-ui
+    - lobechat
+    - nextchat
+    - sillytavern
+    - jan
+    - h2ogpt
+    - privategpt
+    - quivr
+    # NOTE: 'litellm', 'bentoml', 'gradio', 'comfyui', 'streamlit',
+    # 'anythingllm' appear in MULTIPLE sources but MERGE to a single
+    # Technology node per name (Cypher MERGE semantics).

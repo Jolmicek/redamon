@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 
+## [4.11.0] - 2026-05-23
+
+### Added
+
+- **Adversarial AI Surface Recon — distributed hooks across the recon pipeline** ([recon/helpers/ai_signal_catalog.py](recon/helpers/ai_signal_catalog.py), [domain_recon.py](recon/main_recon_modules/domain_recon.py), [port_scan.py](recon/main_recon_modules/port_scan.py), [masscan_scan.py](recon/main_recon_modules/masscan_scan.py), [nmap_scan.py](recon/main_recon_modules/nmap_scan.py), [http_probe.py](recon/main_recon_modules/http_probe.py)) — every standard recon module recognises AI-shaped signals (LLM runtimes, vector DBs, AI frontends, proxies, SDK clients, MLOps stacks) and attaches them to existing graph nodes. Black-box detection only; no extra HTTP traffic. Single source-of-truth catalogue covers 28 ports, 22 header families, 29 title regexes, 21 body fingerprints, 25 favicon hashes, 6 Nmap version patterns.
+
+- **AI annotations on the graph** ([graph_db/mixins/recon/domain_mixin.py](graph_db/mixins/recon/domain_mixin.py), [port_mixin.py](graph_db/mixins/recon/port_mixin.py), [http_mixin.py](graph_db/mixins/recon/http_mixin.py)) — `Subdomain.ai_service_hint` from TXT/NS, `Service.ai_runtime_version` from Nmap, `Endpoint.is_ai_framework_detected` / `ai_framework_name` / `ai_frontend_product_guess` from httpx, `Technology.category` ∈ {`ai-runtime`, `ai-vector-db`, `ai-framework`, `ai-proxy`, `ai-frontend`, `ai-sdk-client`, `ai-mlops`}, `USES_TECHNOLOGY.detected_by` carries the signal channel (`naabu-ai-port`, `masscan-ai-port`, `httpx-ai-header`, `httpx-ai-favicon`, `httpx-ai-title`). Zero new node labels.
+
+- **BaseURL → Endpoint model split** ([graph_db/mixins/recon/http_mixin.py](graph_db/mixins/recon/http_mixin.py)) — `BaseURL` is now one node per scheme+host+port; each probed path becomes an `Endpoint` keyed by `(path, method, baseurl)` linked via `(BaseURL)-[:HAS_ENDPOINT]->(Endpoint)`. Per-path response data and the `USES_TECHNOLOGY` edge from http_probe live on `Endpoint`, so a host serving a chat UI on `/` and a runtime API on `/v1/chat/completions` keeps two distinct AI-tagged endpoints under one BaseURL.
+
+- **Two-tier port-catalog promotion** ([recon/main_recon_modules/port_scan.py](recon/main_recon_modules/port_scan.py), [masscan_scan.py](recon/main_recon_modules/masscan_scan.py)) — vendor-specific AI ports (Ollama 11434, Qdrant 6333/6334, Milvus 19530, ComfyUI 8188, Streamlit 8501, Gradio 7860, Argilla 6900, Kokoro-TTS 8880, SGLang 30000, LangGraph 2024) auto-promote to `Technology(ai-*)` from port output alone. Generic-but-AI-capable ports (1234, 3000, 3001, 4000, 5000, 5001, 6006, 7865, 8000, 8001, 8002, 8080, 8081, 8123, 8265, 9091, 50051) carry a `disambiguate=True` flag — port-scan skips them; promotion happens only if http_probe corroborates via header/title/favicon. Prevents false-positive AI tags on Tomcat/Phoenix/Node-dev/Prometheus-pushgateway boxes.
+
+- **AI Wappalyzer body fingerprints** ([recon/main_recon_modules/http_probe.py](recon/main_recon_modules/http_probe.py)) — Wappalyzer-style regex catalogue scans the captured response body (≤ 512 KB) for AI-product signatures: `<gradio-app>` + `window.gradio_config`, `txt2img_textarea` (A1111), `fooocus_v2`, `invoke-favicon.svg`, `aria-label="Loading ComfyUI"`, `mlflow-ui-container`, Weaviate `/v1/meta` shape, Chroma `nanosecond heartbeat`, SGLang `/get_model_info`, KoboldCpp `"result":"KoboldCpp"`, LocalAI `/models/apply`, `@anthropic-ai/sdk` import, `dangerouslyAllowBrowser: true`. Fires only if no higher-priority channel (header / favicon / title) already won.
+
+
+---
+
+
 ## [4.10.1] - 2026-05-17
 
 ### Added
