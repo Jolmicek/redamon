@@ -928,22 +928,6 @@ export default function GraphPage() {
     }
   }, [projectId, currentProject, setCurrentProject])
 
-  const handleToggleDeepThink = useCallback(async (newValue: boolean) => {
-    if (!projectId) return
-    try {
-      const res = await fetch(`/api/projects/${projectId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentDeepThinkEnabled: newValue }),
-      })
-      if (res.ok && currentProject) {
-        setCurrentProject({ ...currentProject, agentDeepThinkEnabled: newValue })
-      }
-    } catch (error) {
-      console.error('Failed to toggle deep think:', error)
-    }
-  }, [projectId, currentProject, setCurrentProject])
-
   const handleModelChange = useCallback(async (modelId: string) => {
     if (!projectId) return
     try {
@@ -1523,8 +1507,6 @@ export default function GraphPage() {
         toolPhaseMap={currentProject?.agentToolPhaseMap}
         stealthMode={currentProject?.stealthMode}
         onToggleStealth={handleToggleStealth}
-        deepThinkEnabled={currentProject?.agentDeepThinkEnabled}
-        onToggleDeepThink={handleToggleDeepThink}
         onRefetchGraph={refetchGraph}
         isOtherChainsHidden={isOtherChainsHidden}
         onToggleOtherChains={handleToggleOtherChains}

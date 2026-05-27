@@ -853,14 +853,21 @@ class TestSummaryTier(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestFormatStepDiagnostics(unittest.TestCase):
-    """The `[3ms, application_5xx_fast]` suffix that turns the chain context
-    from a list of FAILED stamps into a diagnostic timeline."""
+    """The `[3ms, application_5xx_fast: <hint>]` suffix that turns the chain
+    context from a list of FAILED stamps into a diagnostic timeline. The
+    label is preserved (engineers grep for it) and a terse plain-English
+    hint is appended after a colon so the LLM gets immediate context."""
 
     def test_renders_duration_and_class(self):
         out = _format_step_diagnostics(
             {"duration_ms": 3, "error_class": "application_5xx_fast"}
         )
-        self.assertEqual(out, " [3ms, application_5xx_fast]")
+        # Label preserved for grep / programmatic consumers
+        self.assertIn("application_5xx_fast", out)
+        # Hint appended after colon, plain English
+        self.assertIn("parse-time crash", out)
+        # Duration prefix unchanged
+        self.assertTrue(out.startswith(" [3ms,"))
 
     def test_omits_class_when_success(self):
         """Success steps don't need a class annotation — just timing."""
@@ -873,7 +880,9 @@ class TestFormatStepDiagnostics(unittest.TestCase):
         out = _format_step_diagnostics(
             {"duration_ms": 12, "error_class": "shell_parser_error"}
         )
-        self.assertEqual(out, " [12ms, shell_parser_error]")
+        self.assertIn("shell_parser_error", out)
+        self.assertIn("shell quoting", out)
+        self.assertTrue(out.startswith(" [12ms,"))
 
     def test_legacy_step_renders_empty(self):
         """Backward compat: steps written before P2 shipped (no duration_ms
@@ -889,7 +898,9 @@ class TestFormatStepDiagnostics(unittest.TestCase):
 
     def test_only_class_no_duration(self):
         out = _format_step_diagnostics({"error_class": "application_4xx"})
-        self.assertEqual(out, " [application_4xx]")
+        self.assertIn("application_4xx", out)
+        # Hint present even without duration
+        self.assertIn("semantic rejection", out)
 
     def test_zero_duration_still_renders(self):
         """duration_ms=0 is a real measurement (sub-millisecond), not
@@ -897,7 +908,8 @@ class TestFormatStepDiagnostics(unittest.TestCase):
         out = _format_step_diagnostics(
             {"duration_ms": 0, "error_class": "tool_internal_error"}
         )
-        self.assertEqual(out, " [0ms, tool_internal_error]")
+        self.assertIn("0ms", out)
+        self.assertIn("tool_internal_error", out)
 
     def test_float_duration_truncates_to_int(self):
         out = _format_step_diagnostics(
@@ -910,6 +922,28 @@ class TestFormatStepDiagnostics(unittest.TestCase):
         than confuse the LLM."""
         out = _format_step_diagnostics({"duration_ms": -5})
         self.assertEqual(out, "")
+
+    def test_unknown_class_falls_back_to_label_only(self):
+        """Defensive: when an error_class has no hint registered (new class
+        added to classifier without matching ERROR_CLASS_HINTS entry), the
+        renderer falls back to label-only rendering so the chain context
+        still carries the diagnostic."""
+        out = _format_step_diagnostics(
+            {"duration_ms": 7, "error_class": "future_class_not_in_hints"}
+        )
+        self.assertEqual(out, " [7ms, future_class_not_in_hints]")
+
+    def test_renders_new_networked_fast_class(self):
+        """The new tier added to address networked-target parse-time crashes
+        (110ms 5xx on docker-network targets) gets its own hint, not
+        bucketed as a DB-level error."""
+        out = _format_step_diagnostics(
+            {"duration_ms": 110, "error_class": "application_5xx_networked_fast"}
+        )
+        self.assertIn("application_5xx_networked_fast", out)
+        self.assertIn("parse-time crash", out)
+        self.assertIn("networked", out)
+        self.assertNotIn("DB", out)  # crucial — must NOT say "DB-level error"
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +991,10 @@ class TestFormatChainContextWithDiagnostics(unittest.TestCase):
             error_message="shell quoting",
         )]
         out = format_chain_context([], [], [], trace)
-        self.assertIn("[12ms, shell_parser_error]", out)
+        # Diagnostic suffix now renders as `[12ms, shell_parser_error: <hint>]`
+        # — the label is preserved (so engineers can still grep) and the
+        # terse hint is appended after a colon for the LLM.
+        self.assertIn("[12ms, shell_parser_error:", out)
         # The FAILED line should also carry the class so 12 FAILED rows
         # aren't all identical to the LLM
         self.assertIn("[shell_parser_error]", out)
@@ -975,9 +1012,12 @@ class TestFormatChainContextWithDiagnostics(unittest.TestCase):
         ]
         out = format_chain_context([], [], [], trace)
         # Wave header lists the tools, per-tool lines show args + diagnostics
-        self.assertIn("[3ms, application_5xx_fast]", out)
-        self.assertIn("[4ms, application_5xx_fast]", out)
-        self.assertIn("[2ms, application_5xx_fast]", out)
+        # in the new `[duration, label: hint]` format. We assert the label
+        # is present after the duration (still grep-able) — the trailing
+        # hint text is verified separately in TestFormatStepDiagnostics.
+        self.assertIn("[3ms, application_5xx_fast:", out)
+        self.assertIn("[4ms, application_5xx_fast:", out)
+        self.assertIn("[2ms, application_5xx_fast:", out)
 
     def test_legacy_step_still_renders_cleanly(self):
         """A step without error_class/duration_ms (legacy/before P2) must

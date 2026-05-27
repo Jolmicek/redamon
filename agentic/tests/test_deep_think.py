@@ -101,18 +101,20 @@ class TestDeepThinkTriggerConditions(unittest.TestCase):
     """Test the trigger detection logic (extracted from think_node)."""
 
     def _detect_trigger(self, iteration, just_transitioned, exec_trace, need_deep_think):
-        """Replicate the trigger detection logic from think_node."""
+        """Replicate the trigger detection logic from think_node.
+
+        Deep Think no longer fires unconditionally on iteration 1 — the first
+        step uses the same organic triggers as every other step. So the
+        conditions here intentionally start at "phase transition" and do not
+        special-case iteration == 1.
+        """
         trigger_reason = None
 
-        # Condition 1: first iteration
-        if iteration == 1:
-            trigger_reason = "First iteration — establishing initial strategy"
-
-        # Condition 2: phase transition
-        elif just_transitioned:
+        # Condition 1: phase transition
+        if just_transitioned:
             trigger_reason = f"Phase transition to {just_transitioned} — re-evaluating strategy"
 
-        # Condition 3: failure loop (3+ consecutive failures)
+        # Condition 2: failure loop (3+ consecutive failures)
         if not trigger_reason and len(exec_trace) >= 3:
             consecutive = 0
             for step in reversed(exec_trace[-6:]):
@@ -130,15 +132,17 @@ class TestDeepThinkTriggerConditions(unittest.TestCase):
             if consecutive >= 3:
                 trigger_reason = f"Failure loop detected ({consecutive} consecutive failures) — pivoting strategy"
 
-        # Condition 4: LLM self-requested
+        # Condition 3: LLM self-requested
         if not trigger_reason and need_deep_think:
             trigger_reason = "Agent self-assessed stagnation — strategic re-evaluation requested"
 
         return trigger_reason
 
-    def test_trigger_first_iteration(self):
+    def test_iteration_1_alone_does_not_trigger(self):
+        """First iteration with no transition / no trace / no self-request is
+        a normal Think step — Deep Think must NOT fire just because it's iter 1."""
         reason = self._detect_trigger(iteration=1, just_transitioned=None, exec_trace=[], need_deep_think=False)
-        self.assertIn("First iteration", reason)
+        self.assertIsNone(reason)
 
     def test_trigger_phase_transition(self):
         reason = self._detect_trigger(iteration=5, just_transitioned="exploitation", exec_trace=[], need_deep_think=False)
@@ -183,20 +187,22 @@ class TestDeepThinkTriggerConditions(unittest.TestCase):
         reason = self._detect_trigger(iteration=5, just_transitioned=None, exec_trace=trace, need_deep_think=True)
         self.assertIn("Agent self-assessed stagnation", reason)
 
-    def test_self_request_not_triggered_when_first_iteration(self):
-        """Condition 1 takes priority over condition 4."""
+    def test_self_request_fires_on_first_iteration(self):
+        """Iteration 1 no longer wins by default — when the LLM has set
+        need_deep_think, the self-request reason should now surface even on
+        the very first step."""
         reason = self._detect_trigger(iteration=1, just_transitioned=None, exec_trace=[], need_deep_think=True)
-        self.assertIn("First iteration", reason)
-        self.assertNotIn("stagnation", reason)
+        self.assertIn("stagnation", reason)
+        self.assertNotIn("First iteration", reason)
 
     def test_self_request_not_triggered_when_phase_transition(self):
-        """Condition 2 takes priority over condition 4."""
+        """Phase transition takes priority over self-request."""
         reason = self._detect_trigger(iteration=5, just_transitioned="exploitation", exec_trace=[], need_deep_think=True)
         self.assertIn("Phase transition", reason)
         self.assertNotIn("stagnation", reason)
 
     def test_self_request_not_triggered_when_failure_loop(self):
-        """Condition 3 takes priority over condition 4."""
+        """Failure loop takes priority over self-request."""
         trace = [
             {"success": False, "tool_output": "error"},
             {"success": False, "tool_output": "error"},
@@ -751,6 +757,349 @@ class TestLargeHypothesisListsRender(unittest.TestCase):
         # Each block must be properly numbered (no '0.' or '21.')
         self.assertIn("  1. **Hypothesis 0:", block)
         self.assertIn("  20. **Hypothesis 19:", block)
+
+
+# ---------------------------------------------------------------------------
+# Regression: Deep Think is always-on and no longer fires on iter 1 by force
+# ---------------------------------------------------------------------------
+#
+# The user-facing toggle and the `DEEP_THINK_ENABLED` backend flag were both
+# removed. Deep Think now runs unconditionally on every think turn, and the
+# trigger detection no longer hard-codes "iteration == 1" as a trigger.
+# These tests guard those two invariants — break them and the regression
+# will surface here rather than during a live session.
+
+
+class TestDeepThinkAlwaysOn(unittest.TestCase):
+    """The on/off switch is gone: DEEP_THINK_ENABLED must NOT appear in
+    DEFAULT_AGENT_SETTINGS, must NOT be mapped from the project record, and
+    must NOT be checked inside think_node."""
+
+    def test_default_agent_settings_has_no_deep_think_enabled(self):
+        from project_settings import DEFAULT_AGENT_SETTINGS
+        self.assertNotIn(
+            "DEEP_THINK_ENABLED", DEFAULT_AGENT_SETTINGS,
+            "DEEP_THINK_ENABLED has been removed — Deep Think is always-on. "
+            "If you need to gate the feature, do not reintroduce this flag."
+        )
+
+    def test_fetch_agent_settings_does_not_map_agent_deep_think_enabled(self):
+        """The webapp no longer ships `agentDeepThinkEnabled` on the project
+        record, and the backend must not try to map it."""
+        import inspect
+        from project_settings import fetch_agent_settings
+        src = inspect.getsource(fetch_agent_settings)
+        self.assertNotIn(
+            "agentDeepThinkEnabled", src,
+            "fetch_agent_settings still maps agentDeepThinkEnabled — the Prisma "
+            "column has been dropped, so this mapping would crash at runtime.",
+        )
+        self.assertNotIn(
+            "DEEP_THINK_ENABLED", src,
+            "fetch_agent_settings still references DEEP_THINK_ENABLED — the "
+            "setting key is gone; drop the mapping line.",
+        )
+
+    def test_think_node_has_no_deep_think_enabled_guard(self):
+        """The three `if get_setting('DEEP_THINK_ENABLED', ...)` guards inside
+        think_node have been removed. If a future refactor re-adds one, the
+        toggle effectively comes back from the dead — block that here."""
+        import inspect
+        from orchestrator_helpers.nodes.think_node import think_node
+        src = inspect.getsource(think_node)
+        self.assertNotIn(
+            "DEEP_THINK_ENABLED", src,
+            "think_node references DEEP_THINK_ENABLED — the on/off switch was "
+            "removed. Deep Think must run unconditionally now.",
+        )
+
+    def test_think_node_does_not_force_deep_think_on_iteration_1(self):
+        """The 'first iteration of session' trigger was removed so the very
+        first step uses normal Think. Guard against re-introduction."""
+        import inspect
+        from orchestrator_helpers.nodes.think_node import think_node
+        src = inspect.getsource(think_node)
+        # Be specific: the literal that used to live in the production code.
+        self.assertNotIn(
+            "First iteration — establishing initial strategy", src,
+            "think_node re-introduced the forced first-iteration Deep Think "
+            "trigger. Iter 1 must take the normal Think path.",
+        )
+        # And: there must be no `if iteration == 1` / `iteration==1` branch
+        # that sets trigger_reason. Crude but effective.
+        for needle in ("if iteration == 1", "if iteration==1"):
+            self.assertNotIn(
+                needle, src,
+                f"think_node has an `{needle}` branch — that smells like the "
+                "forced first-iteration trigger coming back.",
+            )
+
+    def test_self_request_instruction_is_always_injected(self):
+        """The `DEEP_THINK_SELF_REQUEST_INSTRUCTION` injection used to be
+        gated on DEEP_THINK_ENABLED. It must now run unconditionally so the
+        LLM always knows it can ask for a strategic re-evaluation."""
+        import inspect
+        from orchestrator_helpers.nodes.think_node import think_node
+        src = inspect.getsource(think_node)
+        self.assertIn(
+            "system_prompt += DEEP_THINK_SELF_REQUEST_INSTRUCTION", src,
+            "Self-request instruction is not injected anymore — the LLM will "
+            "stop emitting `need_deep_think: true` and cannot ask for help.",
+        )
+        # And it must not be wrapped in any `if` immediately before that line.
+        inject_idx = src.index("system_prompt += DEEP_THINK_SELF_REQUEST_INSTRUCTION")
+        prev_50 = src[max(0, inject_idx - 80):inject_idx]
+        self.assertNotRegex(
+            prev_50, r"if\s+get_setting\(\s*'DEEP_THINK_ENABLED",
+            "Self-request injection is gated on DEEP_THINK_ENABLED again — "
+            "the flag is gone; remove the guard.",
+        )
+
+    def test_need_deep_think_persistence_is_unconditional(self):
+        """`_need_deep_think` used to be force-zeroed when DEEP_THINK_ENABLED
+        was false. With the flag gone, it must persist verbatim from the
+        LLM decision."""
+        import inspect
+        from orchestrator_helpers.nodes.think_node import think_node
+        src = inspect.getsource(think_node)
+        self.assertIn(
+            'updates["_need_deep_think"] = decision.need_deep_think', src,
+            "_need_deep_think is no longer persisted from the LLM decision.",
+        )
+        # The previous form ended with `... else False` — make sure it's gone.
+        self.assertNotIn(
+            "decision.need_deep_think if get_setting('DEEP_THINK_ENABLED'", src,
+            "_need_deep_think still has the conditional `if get_setting(...)` "
+            "tail — drop it.",
+        )
+
+
+class TestNormalTriggersStillWorkOnIteration1(unittest.TestCase):
+    """Removing the forced iter-1 trigger must NOT prevent organic triggers
+    from firing on the very first step. If the LLM somehow set
+    `_need_deep_think=true` before iter 1 (e.g. carried over from a previous
+    session via checkpointer), Deep Think should still fire on iter 1."""
+
+    def _detect_trigger(self, iteration, just_transitioned, exec_trace, need_deep_think):
+        """Mirror of the helper used in TestDeepThinkTriggerConditions —
+        kept inline so this test class is self-contained."""
+        trigger_reason = None
+        if just_transitioned:
+            trigger_reason = f"Phase transition to {just_transitioned} — re-evaluating strategy"
+        if not trigger_reason and len(exec_trace) >= 3:
+            consecutive = 0
+            for step in reversed(exec_trace[-6:]):
+                out = ((step.get("tool_output") or "")[:500]).lower()
+                is_fail = (
+                    not step.get("success", True)
+                    or "failed" in out
+                    or "error" in out
+                    or "exploit completed, but no session" in out
+                )
+                if is_fail:
+                    consecutive += 1
+                else:
+                    break
+            if consecutive >= 3:
+                trigger_reason = f"Failure loop detected ({consecutive} consecutive failures) — pivoting strategy"
+        if not trigger_reason and need_deep_think:
+            trigger_reason = "Agent self-assessed stagnation — strategic re-evaluation requested"
+        return trigger_reason
+
+    def test_iter_1_phase_transition_still_triggers(self):
+        """Rare but valid: a checkpointed session can resume at iter 1 mid-
+        phase-transition (e.g. user switched attack path on a fresh session
+        that already had a prior phase)."""
+        reason = self._detect_trigger(iteration=1, just_transitioned="exploitation", exec_trace=[], need_deep_think=False)
+        self.assertIsNotNone(reason)
+        self.assertIn("Phase transition", reason)
+
+    def test_iter_1_self_request_still_triggers(self):
+        """Carry-over need_deep_think from a prior session checkpoint."""
+        reason = self._detect_trigger(iteration=1, just_transitioned=None, exec_trace=[], need_deep_think=True)
+        self.assertIsNotNone(reason)
+        self.assertIn("stagnation", reason)
+
+    def test_normal_iter_1_is_silent(self):
+        """The headline behaviour: a fresh session with no priors,
+        no execution trace, no phase transition, no self-request → no
+        Deep Think on iter 1."""
+        reason = self._detect_trigger(iteration=1, just_transitioned=None, exec_trace=[], need_deep_think=False)
+        self.assertIsNone(reason)
+
+
+# ---------------------------------------------------------------------------
+# Integration: productivity score → tier → trigger composition
+# ---------------------------------------------------------------------------
+#
+# The trigger-detection helper above mirrors think_node's branching but uses
+# a stub failure counter. The real production composition is:
+#
+#     compute_productivity_score(...) -> score
+#     tier_for_score(score) -> tier  ("green" | ... | "critical")
+#     if tier in ("orange", "red", "critical") and not _cooldown_active:
+#         trigger_reason = ...
+#
+# These tests exercise the REAL productivity functions and assert that the
+# tier the score lands in matches what the trigger logic would act on. This
+# is the closest we can get to an end-to-end integration test without
+# spinning up the full LangGraph + Neo4j + LLM stack (see the rationale
+# documented in test_root_think_and_guardrail_retry.py).
+
+
+class TestDeepThinkProductivityIntegration(unittest.TestCase):
+    """Real `compute_productivity_score` + `tier_for_score` driving the
+    Deep Think trigger decision. Validates the composition that
+    iter-1-no-longer-fires-by-default depends on: when the trace is empty
+    (iter 1), productivity stays green and no trigger fires; when failures
+    accumulate, the tier escalates and the trigger fires."""
+
+    def _trigger_for_trace(self, *, iteration, exec_trace, iterations_since_state_grew=0,
+                            tested_axes=None, cooldown_until=0, just_transitioned=None,
+                            need_deep_think=False, phase="informational"):
+        """Production composition: real score → real tier → trigger decision.
+        Returns the trigger reason string (or None)."""
+        from orchestrator_helpers.productivity import compute_productivity_score, tier_for_score
+
+        trigger_reason = None
+        if just_transitioned:
+            return f"Phase transition to {just_transitioned} — re-evaluating strategy"
+
+        score_obj = None
+        tier = "green"
+        if exec_trace:
+            score_obj = compute_productivity_score(
+                execution_trace=exec_trace,
+                tested_axes=tested_axes or {},
+                iterations_since_state_grew=iterations_since_state_grew,
+                iteration=iteration,
+                max_iterations=100,
+                phase=phase,
+            )
+            tier = tier_for_score(score_obj["score"])
+
+        cooldown_active = iteration < cooldown_until
+        critical_override = score_obj and score_obj["score"] >= 9.0
+        stall_override = iterations_since_state_grew >= 10
+
+        if score_obj is not None and tier in ("orange", "red", "critical"):
+            if not cooldown_active or critical_override or stall_override:
+                trigger_reason = f"Productivity tier '{tier}' (score {score_obj['score']})"
+
+        if not trigger_reason and need_deep_think:
+            trigger_reason = "Agent self-assessed stagnation — strategic re-evaluation requested"
+
+        return trigger_reason
+
+    def test_iter_1_empty_trace_stays_silent(self):
+        """The whole point of the refactor: a fresh session — empty trace,
+        no transition, no self-request — produces NO trigger on iter 1."""
+        reason = self._trigger_for_trace(iteration=1, exec_trace=[])
+        self.assertIsNone(reason)
+
+    def test_iter_2_one_step_stays_green(self):
+        """A single early productive step shouldn't flip the score into
+        any trigger tier — early iterations need room to explore."""
+        trace = [{"success": True, "tool_output": "Found open port 80"}]
+        reason = self._trigger_for_trace(iteration=2, exec_trace=trace)
+        self.assertIsNone(reason)
+
+    def test_unproductive_streak_fires_productivity_trigger(self):
+        """Five consecutive unproductive steps should push the score into
+        orange-or-worse and fire the productivity trigger (no cooldown active)."""
+        trace = [
+            {"success": False, "tool_output": "Connection refused",
+             "tool_name": "curl", "tool_args": {"url": "http://x/a"},
+             "output_analysis": {"productivity": "blocked"}},
+            {"success": False, "tool_output": "Error: timeout",
+             "tool_name": "curl", "tool_args": {"url": "http://x/b"},
+             "output_analysis": {"productivity": "blocked"}},
+            {"success": False, "tool_output": "Failed to connect",
+             "tool_name": "curl", "tool_args": {"url": "http://x/c"},
+             "output_analysis": {"productivity": "blocked"}},
+            {"success": False, "tool_output": "Error 500",
+             "tool_name": "curl", "tool_args": {"url": "http://x/d"},
+             "output_analysis": {"productivity": "no_progress"}},
+            {"success": False, "tool_output": "Failed again",
+             "tool_name": "curl", "tool_args": {"url": "http://x/e"},
+             "output_analysis": {"productivity": "no_progress"}},
+        ]
+        reason = self._trigger_for_trace(
+            iteration=8, exec_trace=trace, iterations_since_state_grew=6,
+        )
+        self.assertIsNotNone(reason, "Expected an orange+ tier trigger on a heavy unproductive streak")
+        self.assertIn("Productivity tier", reason)
+
+    def test_productive_trace_stays_silent(self):
+        """A trace of all-new-info steps should NOT trigger."""
+        trace = [
+            {"success": True, "tool_output": "OK",
+             "tool_name": "nmap", "tool_args": {"target": f"10.0.0.{i}"},
+             "output_analysis": {"productivity": "new_info"}}
+            for i in range(5)
+        ]
+        reason = self._trigger_for_trace(
+            iteration=5, exec_trace=trace, iterations_since_state_grew=0,
+        )
+        self.assertIsNone(reason, f"Productive trace should not trigger; got: {reason!r}")
+
+    def test_cooldown_blocks_orange_but_not_critical(self):
+        """When the score lands in orange and cooldown is active, no trigger
+        — unless the score is critical (>=9.0), which overrides cooldown."""
+        trace = [
+            {"success": False, "tool_output": "fail",
+             "tool_name": "curl", "tool_args": {"url": f"http://x/{i}"},
+             "output_analysis": {"productivity": "blocked"}}
+            for i in range(6)
+        ]
+        # Cooldown active (iteration 6, cooldown_until=10): orange should NOT fire.
+        # But this same trace with stall=10 IS a stall override — drop stall to 0
+        # so we isolate the cooldown behaviour.
+        reason = self._trigger_for_trace(
+            iteration=6, exec_trace=trace, cooldown_until=10,
+            iterations_since_state_grew=0,
+        )
+        # We can't perfectly assert orange-vs-red here without pinning weights,
+        # but we CAN assert that a trace which would have fired without cooldown
+        # is silenced when cooldown is active AND the score isn't critical.
+        # If this assertion ever flips, it's a meaningful signal that the
+        # weight tuning made the trace cross critical — worth investigating.
+        if reason is not None:
+            # The only legal way a trigger fires under cooldown is critical override.
+            from orchestrator_helpers.productivity import compute_productivity_score
+            score = compute_productivity_score(
+                execution_trace=trace, tested_axes={},
+                iterations_since_state_grew=0, iteration=6,
+                max_iterations=100, phase="informational",
+            )["score"]
+            self.assertGreaterEqual(
+                score, 9.0,
+                "Cooldown was bypassed but score is not critical — bug or weight drift",
+            )
+
+    def test_stall_override_fires_through_cooldown(self):
+        """When state hasn't grown for 10+ iterations, the trigger fires even
+        with cooldown active — stall override is intentional."""
+        trace = [
+            {"success": False, "tool_output": "fail",
+             "tool_name": "curl", "tool_args": {"url": f"http://x/{i}"},
+             "output_analysis": {"productivity": "blocked"}}
+            for i in range(6)
+        ]
+        reason = self._trigger_for_trace(
+            iteration=6, exec_trace=trace, cooldown_until=20,
+            iterations_since_state_grew=10,  # at the hard threshold
+        )
+        self.assertIsNotNone(reason, "Stall override should bypass cooldown")
+
+    def test_iter_1_self_request_fires_even_with_empty_trace(self):
+        """Carry-over `_need_deep_think` from a checkpointer survives iter
+        rollover and still fires Deep Think on iter 1."""
+        reason = self._trigger_for_trace(
+            iteration=1, exec_trace=[], need_deep_think=True,
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("stagnation", reason)
 
 
 if __name__ == "__main__":

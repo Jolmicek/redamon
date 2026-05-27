@@ -26,6 +26,7 @@ FOCUSED_TESTS=(
     tests.test_tool_confirmation
     tests.test_tool_complete_emission
     tests.test_productivity
+    tests.test_productivity_v2_review
     tests.test_peer_task_scope
     tests.test_phase_gating
     tests.test_soft_allowlist

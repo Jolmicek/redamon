@@ -131,9 +131,6 @@ DEFAULT_AGENT_SETTINGS: dict[str, Any] = {
     'KB_OVERFETCH_FACTOR': None,   # None = inherit from retrieval.overfetch_factor
     'KB_SOURCE_BOOSTS': None,      # None = inherit from source_boosts block; dict = merge overrides
 
-    # Deep Think (Strategic Reasoning)
-    'DEEP_THINK_ENABLED': True,
-
     # Productivity Audit & Loop Detection
     # The orchestrator audits the LLM's per-step productivity verdict
     # (no_progress / duplicate / blocked / new_info / confirmation) and counts
@@ -149,9 +146,36 @@ DEFAULT_AGENT_SETTINGS: dict[str, Any] = {
     # by catching streaks of DIFFERENT payloads that return IDENTICAL short-
     # duration failures (signature of probes being rejected at parse time
     # before reaching the layer the agent thinks it's testing).
-    'UNIFORM_RESPONSE_WINDOW': 8,           # how many recent steps to consider
-    'UNIFORM_RESPONSE_MIN_COUNT': 5,        # min identical-signature steps to fire
-    'UNIFORM_RESPONSE_DURATION_MS': 50,     # below this ms, response is "front-door fast"
+    #
+    # Calibration history: original defaults (window=8, min=5, ms=50) were
+    # tuned for tight back-to-back probe bursts on localhost targets and
+    # never fired on real sessions — agents interleave probes across
+    # hypothesis classes, so 5 same-shape responses in 8 most-recent calls
+    # is unrealistic; and parse-time crashes on networked targets land at
+    # 100-150ms, above the 50ms "fast" threshold. Widened to catch the
+    # dispersed-probe pattern that real agents actually produce.
+    'UNIFORM_RESPONSE_WINDOW': 25,          # how many recent steps to consider
+    'UNIFORM_RESPONSE_MIN_COUNT': 3,        # min identical-signature steps to fire
+    'UNIFORM_RESPONSE_DURATION_MS': 200,    # below this ms, response is "front-door fast" (includes networked overhead)
+
+    # Productivity scoring v2 — continuous score replacing the binary 3/6
+    # streak counter. The score is a weighted sum of five observed signals:
+    # unproductive verdicts, iterations-since-state-grew, max axis-repeat
+    # count, same-pattern recent calls, minus rewards for recent new_info and
+    # actionable_findings. Tiered actions (hint / Deep Think / require
+    # justification / block) are triggered by configurable score thresholds.
+    'PRODUCTIVITY_SCORE_ENABLED': True,      # master switch; if False, falls back to legacy 3/6
+    'PRODUCTIVITY_SCORE_HINT_THRESHOLD': 3.0,
+    'PRODUCTIVITY_SCORE_DEEPTHINK_THRESHOLD': 5.0,
+    'PRODUCTIVITY_SCORE_REQUIRE_PIVOT_THRESHOLD': 7.0,
+    'PRODUCTIVITY_SCORE_BLOCK_THRESHOLD': 9.0,
+    'DEEP_THINK_COOLDOWN_ITERATIONS': 5,     # min iterations between Deep Thinks (override on self-request or critical score)
+    'DEEP_THINK_NOVELTY_JACCARD_MAX': 0.6,   # if new priority_order >= this similarity to prior, reject and re-prompt
+    'STATE_GROWTH_SOFT_HINT_THRESHOLD': 5,   # iterations since state grew → soft hint
+    'STATE_GROWTH_HARD_THRESHOLD': 10,       # iterations since state grew → Deep Think override
+    'AXIS_REPEAT_WARN_COUNT': 2,             # 2nd same-axis attempt → warn
+    'AXIS_REPEAT_REQUIRE_PIVOT_COUNT': 3,    # 3rd same-axis attempt → require what_is_different
+    'AXIS_REPEAT_BLOCK_COUNT': 4,            # 4th same-axis attempt → block
 
     # Debug
     'CREATE_GRAPH_IMAGE_ON_INIT': False,
@@ -363,7 +387,6 @@ def fetch_agent_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['PLAN_MAX_PARALLEL_TOOLS'] = int(project.get('agentPlanMaxParallelTools', DEFAULT_AGENT_SETTINGS['PLAN_MAX_PARALLEL_TOOLS']))
     settings['CYPHER_MAX_RETRIES'] = project.get('agentCypherMaxRetries', DEFAULT_AGENT_SETTINGS['CYPHER_MAX_RETRIES'])
     settings['LLM_PARSE_MAX_RETRIES'] = project.get('agentLlmParseMaxRetries', DEFAULT_AGENT_SETTINGS['LLM_PARSE_MAX_RETRIES'])
-    settings['DEEP_THINK_ENABLED'] = project.get('agentDeepThinkEnabled', DEFAULT_AGENT_SETTINGS['DEEP_THINK_ENABLED'])
     settings['CREATE_GRAPH_IMAGE_ON_INIT'] = project.get('agentCreateGraphImageOnInit', DEFAULT_AGENT_SETTINGS['CREATE_GRAPH_IMAGE_ON_INIT'])
     settings['LOG_MAX_MB'] = project.get('agentLogMaxMb', DEFAULT_AGENT_SETTINGS['LOG_MAX_MB'])
     settings['LOG_BACKUP_COUNT'] = project.get('agentLogBackupCount', DEFAULT_AGENT_SETTINGS['LOG_BACKUP_COUNT'])

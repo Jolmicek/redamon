@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.13.0] - 2026-05-27
+
+### Added
+
+- **Productivity v2: continuous score + tiered actions** ([agentic/orchestrator_helpers/productivity.py](agentic/orchestrator_helpers/productivity.py), [agentic/orchestrator_helpers/nodes/think_node.py](agentic/orchestrator_helpers/nodes/think_node.py), [state.py](agentic/state.py), [project_settings.py](agentic/project_settings.py)) — replaces the legacy binary `3 unproductive of last 6 → fire Deep Think` trigger with a continuous score that fuses five observed signals every think turn: unproductive verdicts, iterations since engagement state last grew, max axis-repeat count, same-pattern recent calls, minus rewards for recent `new_info` and actionable findings. Score maps to five tiers (green → yellow → orange → red → critical) with escalating prompt-level actions: soft hint → fire Deep Think → demand a hypothesis pivot → block the next expensive call on the dominant axis. Weights scale dynamically with session age and phase. Backward-compatible: `PRODUCTIVITY_SCORE_ENABLED=false` falls back to the legacy 3/6 counter.
+
+- **Axis lock-in detector** ([agentic/orchestrator_helpers/productivity.py](agentic/orchestrator_helpers/productivity.py)) — per-tool-family extractor (`extract_axis`) reduces every expensive call to the semantic dimensions the agent is *holding constant* (e.g. `(family=credential_brute_force, target=/login, fixed_user=admin)`), keyed into a session-long `tested_axes` ledger. Three brute-force attempts against the same username collapse onto a single axis key even when the wordlists differ — slow loops spread across 20+ iterations now register as repetition. Records on both the single-tool and wave analysis paths.
+
+- **State-growth signal** ([agentic/orchestrator_helpers/productivity.py](agentic/orchestrator_helpers/productivity.py), [think_node.py](agentic/orchestrator_helpers/nodes/think_node.py)) — orchestrator-owned `_iterations_since_state_grew` counter resets to 0 whenever `target_info` / `chain_findings_memory` / `actionable_findings` grew, otherwise increments. Independent of LLM self-report; LLM cannot game it. Becomes the dominant input to the score once stall exceeds `STATE_GROWTH_SOFT_HINT_THRESHOLD` (default 5).
+
+- **Deep Think cooldown** ([think_node.py](agentic/orchestrator_helpers/nodes/think_node.py)) — after Deep Think fires, suppresses re-fires for `DEEP_THINK_COOLDOWN_ITERATIONS` (default 5). Bypassed by critical-tier score, state-growth-stall override, or LLM `_need_deep_think=true` self-request. Stops the "32 Deep Thinks in 60 minutes" failure mode where every same-window streak re-fired a fresh strategic analysis before the previous one had been acted on.
+
+- **Deep Think novelty check** ([productivity.py](agentic/orchestrator_helpers/productivity.py), [think_node.py](agentic/orchestrator_helpers/nodes/think_node.py)) — token-Jaccard similarity between the new `priority_order` and the previous one (stored in `_previous_priority_order`); if it exceeds `DEEP_THINK_NOVELTY_JACCARD_MAX` (default 0.6), a "plan novelty low" warning is prepended to the rendered Deep Think block, forcing the agent to articulate what specific parameter has changed or pivot to a strategy class not present in the previous plan.
+
+### Changed
+
+- **Deep Think trigger condition #3** is now score-tier-driven (`Productivity tier 'orange|red|critical' (score N.N) — components: {...}`) instead of the legacy "Unproductive streak detected (N/6 ...)". Tier-specific prompt hints (yellow / red / critical) are injected into the system prompt before the main think LLM call.
+
+### Measured impact
+
+- Single-target re-run, same model, same vulnerability chain: **−37% total tokens** (3.22M → 2.01M), **−35% wall time** (60m → 38m), **−63% Deep Thinks** (32 → 12, all genuinely needed), same flag recovered.
+
+### Docs
+
+- **README.AGENTIC_SYSTEM.md** ([readmes/README.AGENTIC_SYSTEM.md](readmes/README.AGENTIC_SYSTEM.md)) — Executive Summary rewritten with cognitive-scaffolding framing; *Deep Think* chapter gains new Cooldown and Novelty Check subsections; *Productivity Verdict & Loop Detector* chapter gains four new subsections (State-Growth Signal, Axis Lock-in Ledger, Continuous Productivity Score, Dynamic Weights); both flow diagrams rewritten to show the score → tier → action → cooldown → novelty pipeline.
+
+### Tests
+
+- 221 productivity tests total (133 in [test_productivity.py](agentic/tests/test_productivity.py), 88 in the new [test_productivity_v2_review.py](agentic/tests/test_productivity_v2_review.py)): axis extractor per tool family, ledger immutability, Jaccard edge cases, score boundary math, dynamic-weight scaling, tier mapping, cooldown arithmetic, full XBEN-007 timeline smoke, AST-grade wiring tests that lock the new statements in place across both the single-tool and wave analysis paths.
+
+
+---
+
+
 ## [4.12.0] - 2026-05-24
 
 ### Added

@@ -280,7 +280,7 @@ describe('reconPresetSchema stripping', () => {
     const result = reconPresetSchema.safeParse({
       httpxEnabled: true,
       agentMaxIterations: 50,
-      agentDeepThinkEnabled: true,
+      agentRequireToolConfirmation: true,
     })
     expect(result.success).toBe(true)
     expect(result.data).toEqual({ httpxEnabled: true })

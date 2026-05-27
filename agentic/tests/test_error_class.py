@@ -268,17 +268,31 @@ class TestApplication5xxLatencyBranch(unittest.TestCase):
             "application_5xx_fast",
         )
 
-    def test_5xx_normal_latency(self):
+    def test_5xx_networked_fast_latency(self):
+        """140ms on a networked target falls into the networked-fast tier:
+        still a parse-time / early-guard crash signature, but reaching the
+        target over the network adds ~100ms of round-trip overhead."""
         self.assertEqual(
             _classify(
                 tool_output="HTTP/1.1 500 Internal Server Error",
                 duration_ms=140,
             ),
+            "application_5xx_networked_fast",
+        )
+
+    def test_5xx_normal_latency(self):
+        """>=200ms means the application reached its deep error path
+        (DB / business-logic crash), not an early guard."""
+        self.assertEqual(
+            _classify(
+                tool_output="HTTP/1.1 500 Internal Server Error",
+                duration_ms=350,
+            ),
             "application_5xx_normal",
         )
 
     def test_5xx_boundary_just_below(self):
-        """49ms is fast; 50ms is normal. The boundary is intentional."""
+        """49ms is localhost-fast; 50ms crosses into the networked-fast tier."""
         self.assertEqual(
             _classify(
                 tool_output="HTTP/1.1 500 Internal Server Error",
@@ -288,10 +302,24 @@ class TestApplication5xxLatencyBranch(unittest.TestCase):
         )
 
     def test_5xx_boundary_at_threshold(self):
+        """At exactly FAST_RESPONSE_THRESHOLD_MS (50ms), classification
+        promotes to the networked-fast tier — still a parse-time-crash
+        signature, just with the networking overhead included."""
         self.assertEqual(
             _classify(
                 tool_output="HTTP/1.1 500 Internal Server Error",
                 duration_ms=FAST_RESPONSE_THRESHOLD_MS,
+            ),
+            "application_5xx_networked_fast",
+        )
+
+    def test_5xx_networked_boundary_at_threshold(self):
+        """At exactly NETWORKED_FAST_THRESHOLD_MS (200ms), classification
+        promotes to the normal tier — deep error path was reached."""
+        self.assertEqual(
+            _classify(
+                tool_output="HTTP/1.1 500 Internal Server Error",
+                duration_ms=_ec.NETWORKED_FAST_THRESHOLD_MS,
             ),
             "application_5xx_normal",
         )
@@ -524,6 +552,7 @@ class TestErrorClassHints(unittest.TestCase):
             "tool_internal_error",
             "application_4xx",
             "application_5xx_fast",
+            "application_5xx_networked_fast",
             "application_5xx_normal",
         }
         self.assertEqual(

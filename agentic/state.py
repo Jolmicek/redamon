@@ -824,6 +824,25 @@ class AgentState(TypedDict):
     deep_think_result: Optional[str]
     _need_deep_think: bool  # LLM self-requested Deep Think for next iteration
 
+    # Productivity scoring v2 — dynamic, multi-signal loop detection.
+    # `_deep_think_cooldown_until` suppresses redundant Deep Thinks for N
+    # iterations after one fires (override on self-request or critical score).
+    # `_iterations_since_state_grew` is an observed counter (incremented every
+    # turn, reset whenever target_info / chain_findings_memory grows). It's the
+    # most reliable "is the agent stuck" signal because it does not depend on
+    # the LLM's self-reported productivity verdict.
+    # `_previous_priority_order` lets the orchestrator compare the latest Deep
+    # Think's plan against the prior one and reject paraphrased repeats.
+    # `tested_axes` is a session-long ledger keyed by semantic axis (per
+    # tool-family axis extractor) — addresses the slow-loop case where the same
+    # logical attack is retried with bigger N across iterations spaced too far
+    # apart for the 6-step verdict window to catch.
+    _deep_think_cooldown_until: int  # iteration number; current_iteration < this → suppress
+    _iterations_since_state_grew: int
+    _previous_priority_order: Optional[List[str]]
+    tested_axes: dict  # axis_key (str) -> list of {iteration, verdict, tool} dicts
+    _last_productivity_score: Optional[dict]  # diagnostic: last computed score + components
+
     # Metasploit state tracking
     msf_session_reset_done: bool  # True if metasploit was reset at start of this session
 
@@ -986,6 +1005,12 @@ def create_initial_state(
         # Deep Think
         "deep_think_result": None,
         "_need_deep_think": False,
+        # Productivity scoring v2
+        "_deep_think_cooldown_until": 0,
+        "_iterations_since_state_grew": 0,
+        "_previous_priority_order": None,
+        "tested_axes": {},
+        "_last_productivity_score": None,
         # Metasploit state
         "msf_session_reset_done": False,
         # Fireteam (multi-agent) deployment
@@ -1291,24 +1316,45 @@ def _group_trace_by_iteration(execution_trace: List[dict]) -> List[dict]:
 
 
 def _format_step_diagnostics(tool_entry: dict) -> str:
-    """Build the inline `[12ms, application_5xx_fast]` diagnostic suffix that
-    follows a tool's args in the chain context. Returns empty string when the
-    entry has no diagnostic data (older entries without duration_ms / error_class
-    written before this feature shipped — backward compatible).
+    """Build the inline `[12ms, application_5xx_fast: parse-time crash...]`
+    diagnostic suffix that follows a tool's args in the chain context.
+    Returns empty string when the entry has no diagnostic data (older entries
+    without duration_ms / error_class written before this feature shipped —
+    backward compatible).
 
-    Surfacing duration alongside error_class is the cheap fix for the
-    "all 12 SQL payloads returned 500" trap: 500-in-3ms and 500-in-150ms have
-    the same status code but completely different meanings (parse-time crash
-    vs. DB-level error), and the LLM cannot tell them apart from the status
-    code alone.
+    Surfacing duration alongside the error-class HINT is the cheap fix for
+    the "all 12 SQL payloads returned 500" trap: 500-in-3ms and 500-in-150ms
+    have the same status code but completely different meanings (parse-time
+    crash vs. DB-level error), and the LLM cannot tell them apart from the
+    status code alone.
+
+    Format: `[duration, class_label: terse hint]`
+
+    The class LABEL is preserved (engineers grep agent.log for it, and
+    programmatic consumers in tests assertIn on it). The HINT is appended
+    after a colon so the LLM gets plain English next to the cryptic label.
+    Together they cost ~30-80 chars per step, which is acceptable for the
+    information density gained.
+
+    Falls back to label-only rendering when no hint is registered for the
+    class — defensive, keeps the chain context informative even if a new
+    class is added without a matching ERROR_CLASS_HINTS entry.
     """
+    from orchestrator_helpers.error_class import ERROR_CLASS_HINTS
+
     dur = tool_entry.get("duration_ms")
     ec = tool_entry.get("error_class")
     parts: list[str] = []
     if isinstance(dur, (int, float)) and dur >= 0:
         parts.append(f"{int(dur)}ms")
     if ec and ec != "success":
-        parts.append(str(ec))
+        hint = ERROR_CLASS_HINTS.get(ec)
+        if hint:
+            parts.append(f"{ec}: {hint}")
+        else:
+            # Unknown class — show just the label so the chain context still
+            # carries the diagnostic, even if the hint registry is stale.
+            parts.append(str(ec))
     if not parts:
         return ""
     return f" [{', '.join(parts)}]"

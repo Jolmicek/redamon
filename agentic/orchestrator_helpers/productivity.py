@@ -34,7 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Optional
+from typing import Optional, Tuple, List
 
 
 def _normalize_args_pattern(tool_name: str, tool_args: dict) -> str:
@@ -230,22 +230,60 @@ def detect_uniform_response_anomaly(
         signatures.append((ec, size_bucket))
         durations.append(int(step.get("duration_ms") or 0))
 
+    # Diagnostic-failure classes (mirror of error_class.is_diagnostic_failure).
+    # Inlined to keep productivity.py standalone-loadable by tests that use
+    # importlib.spec_from_file_location to dodge the orchestrator_helpers
+    # __init__.py (which pulls in pydantic via state.py). The canonical
+    # source of truth is `error_class.is_diagnostic_failure` — when adding
+    # a new failure class, update BOTH.
+    _DIAGNOSTIC_FAILURE_CLASSES = frozenset({
+        "shell_parser_error",
+        "transport_error",
+        "tool_internal_error",
+        "application_5xx_fast",
+        "application_5xx_networked_fast",
+    })
+
     sig_counts = Counter(signatures)
-    top_sig, top_count = sig_counts.most_common(1)[0]
-    if top_count < min_count:
+
+    # Find the most-common signature that represents a *failure mode the LLM
+    # might mis-classify as 'vector tested'*. The previous implementation
+    # only checked the single most-common signature; in sessions where the
+    # agent does a lot of successful baseline probing (common in early
+    # turns), the success bucket dominates and the detector returned None
+    # WITHOUT examining the smaller failure clusters at all. Iterate through
+    # the ranked signatures in descending order and pick the first one that
+    # (a) belongs to a diagnostic-failure class AND (b) meets the min_count
+    # threshold.
+    #
+    # The diagnostic-failure filter is critical for signal quality: a
+    # uniform `application_4xx` pattern (3 recon GETs all returning 404)
+    # is NOT a "your input didn't reach the layer" signal — it's a
+    # legitimate negative result (the paths don't exist). Firing on those
+    # would be false-positive noise that trains the agent to ignore the
+    # warning, blunting it for the cases where the warning is actually true
+    # (uniform fast-5xx, shell-quoting failures, network errors).
+    top_sig = None
+    top_count = 0
+    for sig, count in sig_counts.most_common():
+        if count < min_count:
+            break  # subsequent entries are smaller — stop scanning
+        ec_candidate, _ = sig
+        if ec_candidate not in _DIAGNOSTIC_FAILURE_CLASSES:
+            continue  # success / 4xx / normal-latency 5xx are not anomalies; try next
+        top_sig = sig
+        top_count = count
+        break
+
+    if top_sig is None:
         return None
 
-    # The signature must represent something the LLM might mis-classify as
-    # 'vector tested'. Successes don't qualify (a streak of 200s is normal
-    # baseline behavior, not a parse-time-crash signal).
     top_ec, top_size_bucket = top_sig
-    if top_ec in ("success", "_legacy"):
-        return None
 
     matching_indices = [i for i, s in enumerate(signatures) if s == top_sig]
     matching_durations = [durations[i] for i in matching_indices]
-    # All matching durations must be fast. A single 200ms call breaks the
-    # "rejected at the door" signal — the request reached SOMETHING.
+    # All matching durations must be fast. A single >threshold call breaks
+    # the "rejected at the door" signal — the request reached SOMETHING.
     fast_mask = [d > 0 and d < duration_threshold_ms for d in matching_durations]
     if not all(fast_mask):
         return None
@@ -276,6 +314,19 @@ def detect_uniform_response_anomaly(
             "a 'normal' processed response looks like, then compare. (d) Consider that "
             "the vector class you're testing may not even be reachable with your current "
             "payload structure.",
+        "application_5xx_networked_fast":
+            "All probes are 5xx in 50-200ms — the application is crashing at parse time "
+            "or in an early guard clause, BEFORE the layer you intend to test, on a "
+            "networked target (latency includes the docker-network round-trip). Same "
+            "interpretation as `application_5xx_fast`: your input is not being exercised "
+            "the way you think. Re-examine: (a) Is the JSON/body shape valid for the "
+            "framework? (b) Is the Content-Type correct? (c) Try a deliberately VALID "
+            "body once to see what a 'normal' processed response looks like, then "
+            "compare. (d) If you've been testing a vector class (SQLi, NoSQL, SSTI, "
+            "etc.) with manual payloads via execute_curl / execute_code and all of them "
+            "returned this signature, the class is NOT proven negative — escalate to a "
+            "specialized tool for the class (sqlmap with --ignore-code=500 for SQLi, "
+            "dalfox for XSS, etc.) before pivoting to a different vulnerability class.",
         "application_4xx":
             "Uniform 4xx — the server is rejecting these requests semantically. The "
             "endpoint may not accept this method, content-type, or auth shape. This is "
@@ -294,13 +345,462 @@ def detect_uniform_response_anomaly(
         f"  - classification: `{top_ec}`\n"
         f"  - response size:  ~{approx_size} bytes (bucket {top_size_bucket}, ±{size_tolerance}B)\n"
         f"  - duration:       all <{duration_threshold_ms}ms (avg {avg_dur:.0f}ms)\n\n"
-        f"Same status + same size + sub-50ms latency across {top_count} probes is NOT "
+        f"Same status + same size + sub-{duration_threshold_ms}ms latency across {top_count} probes is NOT "
         f"a 'this vector is blocked' signal. It means every probe is being short-circuited "
         f"uniformly — your input is not being processed by the layer you think you're testing.\n\n"
         f"**What to do:** {remediation_hint}\n\n"
         f"**Do NOT mark the current vector class 'tested' on the basis of these responses.** "
         f"The test result is INCONCLUSIVE, not NEGATIVE.\n"
     )
+
+
+# =============================================================================
+# Axis extraction & session-long lock-in detection
+# =============================================================================
+#
+# Each expensive tool call has a "semantic axis" — the dials the agent is
+# *holding constant* across attempts. A bigger wordlist against the same
+# username with the same target is the SAME axis, even though the args differ
+# textually. The axis ledger lets us detect this case session-wide, outside
+# the 6-step rolling window the verdict counter is bound to.
+
+# Heuristic regex matchers for inferring brute-force-shaped activity inside
+# `execute_code` / `kali_shell` scripts. We don't try to be smart — we just
+# look for the textual fingerprints of credential-guessing loops. False
+# negatives are fine (axis check silently skipped); false positives are also
+# fine (axis just won't repeat-match anything).
+_RX_BRUTE_USERNAME = re.compile(
+    r"['\"]username['\"]\s*:\s*['\"]([^'\"]{1,64})['\"]",
+)
+_RX_BRUTE_TARGET = re.compile(
+    r"https?://([a-zA-Z0-9_.\-:]+(?:/[^\s'\"]*)?)",
+)
+_RX_BRUTE_LOOP_HINTS = (
+    "for pw in",
+    "for password in",
+    "rockyou",
+    "wordlist",
+    "10k-most-common",
+    "passwords.txt",
+    "common-credentials",
+    "for line in f:",
+)
+_RX_HYDRA_USER = re.compile(r"-l\s+([^\s]+)")
+_RX_HYDRA_PASS = re.compile(r"-(?:p|P)\s+([^\s]+)")
+
+
+def _looks_like_brute_force_script(code: str) -> bool:
+    """True if a script body has the textual hallmarks of credential brute force."""
+    if not code:
+        return False
+    low = code.lower()
+    return any(hint in low for hint in _RX_BRUTE_LOOP_HINTS)
+
+
+def extract_axis(tool_name: Optional[str], tool_args: Optional[dict]) -> Optional[dict]:
+    """Return a semantic axis dict for the given tool call, or None if the
+    tool is too cheap / one-shot to track.
+
+    An axis is a small dict whose stringified form is the dedup key. Each
+    tool family has its own definition of "the dials that stay fixed". For
+    families not listed here, the function returns None and the caller skips
+    the axis check entirely.
+
+    The intent is conservative: only track tool calls where repeated attempts
+    on the same axis are usually wasteful (brute force, large fuzzers,
+    automated injection tooling). Recon probes are explicitly NOT tracked —
+    repeating a curl against a different path is normal exploration.
+    """
+    if not tool_name:
+        return None
+
+    args = tool_args or {}
+
+    # job_spawn wraps another tool — unwrap before classifying
+    inner_tool = tool_name
+    inner_args = args
+    if tool_name == "job_spawn":
+        inner_tool = (args.get("tool_name") or "").strip()
+        inner_args = args.get("args") or {}
+        if not inner_tool:
+            return None
+
+    # ── Family: credential brute force (inline Python) ──────────────────
+    if inner_tool == "execute_code":
+        code = (inner_args.get("code") or "") if isinstance(inner_args, dict) else ""
+        if not _looks_like_brute_force_script(code):
+            return None
+        username_match = _RX_BRUTE_USERNAME.search(code)
+        target_match = _RX_BRUTE_TARGET.search(code)
+        if not username_match:
+            return None
+        username = username_match.group(1)
+        target = target_match.group(1) if target_match else "<unknown>"
+        return {
+            "family": "credential_brute_force",
+            "target": target.split("?")[0][:120],
+            "fixed_user": username[:64],
+            "varied": "password",
+        }
+
+    # ── Family: hydra ────────────────────────────────────────────────────
+    if inner_tool == "execute_hydra":
+        hydra_args = inner_args.get("args") if isinstance(inner_args, dict) else None
+        argstr = hydra_args if isinstance(hydra_args, str) else json.dumps(inner_args)
+        u_match = _RX_HYDRA_USER.search(argstr or "")
+        if not u_match:
+            return None
+        return {
+            "family": "credential_brute_force",
+            "target": "<hydra>",
+            "fixed_user": u_match.group(1)[:64],
+            "varied": "password",
+        }
+
+    # ── Family: directory brute force (ffuf) ─────────────────────────────
+    if inner_tool in ("execute_ffuf",):
+        ffuf_args = inner_args.get("args") if isinstance(inner_args, dict) else ""
+        argstr = ffuf_args if isinstance(ffuf_args, str) else json.dumps(inner_args)
+        url_match = re.search(r"-u\s+(\S+)", argstr or "")
+        if not url_match:
+            return None
+        # Strip FUZZ marker variations to canonicalize the target
+        url = url_match.group(1)
+        url_canonical = re.sub(r"FUZZ\d*", "FUZZ", url).split("?")[0][:140]
+        mc_match = re.search(r"-mc\s+([\d,]+)", argstr or "")
+        return {
+            "family": "directory_brute_force",
+            "target": url_canonical,
+            "fixed_filter": mc_match.group(1) if mc_match else "<default>",
+            "varied": "wordlist",
+        }
+
+    # ── Family: automated SQLi tooling ──────────────────────────────────
+    if inner_tool == "execute_sqlmap" or (
+        inner_tool == "kali_shell"
+        and isinstance(inner_args, dict)
+        and "sqlmap" in str(inner_args.get("command") or "")
+    ):
+        cmd_or_args = inner_args.get("command") or inner_args.get("args") or ""
+        argstr = cmd_or_args if isinstance(cmd_or_args, str) else json.dumps(cmd_or_args)
+        url_match = re.search(r"-u\s+['\"]?(https?://[^\s'\"]+)", argstr)
+        if not url_match:
+            return None
+        return {
+            "family": "automated_sqli",
+            "target": url_match.group(1).split("?")[0][:140],
+            "varied": "tamper_or_technique",
+        }
+
+    return None
+
+
+def axis_key(axis: dict) -> str:
+    """Stable string key for an axis dict, suitable for use as a ledger map key."""
+    if not axis:
+        return ""
+    return "::".join(
+        f"{k}={axis.get(k, '')}" for k in sorted(axis.keys())
+    )
+
+
+def axis_unproductive_count(tested_axes: dict, key: str) -> int:
+    """Count of prior entries on this axis whose verdict was unproductive
+    (no_progress, duplicate, blocked, or hard failure)."""
+    entries = (tested_axes or {}).get(key, [])
+    unproductive = {"no_progress", "duplicate", "blocked", "hard_failure"}
+    return sum(1 for e in entries if (e.get("verdict") or "") in unproductive)
+
+
+def record_axis_attempt(
+    tested_axes: dict,
+    key: str,
+    iteration: int,
+    verdict: str,
+    tool: str,
+) -> dict:
+    """Return a new tested_axes dict with the attempt appended (immutable
+    update — does not mutate the input). Verdict should be one of the five
+    productivity values, or 'hard_failure' for steps where success=False."""
+    if not key:
+        return tested_axes or {}
+    out = dict(tested_axes or {})
+    history = list(out.get(key, []))
+    history.append({
+        "iteration": int(iteration),
+        "verdict": verdict or "",
+        "tool": tool or "",
+    })
+    out[key] = history
+    return out
+
+
+# =============================================================================
+# Deep Think novelty (Jaccard similarity on priority_order)
+# =============================================================================
+
+def _tokenize_priority(items: List[str]) -> set:
+    """Tokenize a priority_order list into a set of normalized lowercase words
+    after stripping common boilerplate (numbering, punctuation, stopwords)."""
+    if not items:
+        return set()
+    stop = {"a", "an", "the", "and", "or", "to", "of", "for", "with",
+            "then", "via", "by", "in", "on", "from", "if", "is", "are",
+            "be", "do", "this", "that", "step", "try", "use", "run",
+            "check", "test", "next", "first", "second", "third"}
+    tokens: set = set()
+    for it in items:
+        if not it:
+            continue
+        # Lowercase, strip punctuation, split, drop stopwords and short tokens
+        words = re.findall(r"[a-zA-Z][a-zA-Z_\-]{2,}", it.lower())
+        for w in words:
+            if w not in stop:
+                tokens.add(w)
+    return tokens
+
+
+def priority_order_jaccard(
+    new_priority: List[str],
+    old_priority: Optional[List[str]],
+) -> float:
+    """Token-level Jaccard similarity between two priority_order lists.
+
+    Returns 0.0 if either list is empty. 1.0 means identical token sets.
+    Used by think_node to detect Deep Think outputs that paraphrase the
+    previous Deep Think without actually changing strategy.
+    """
+    new_tokens = _tokenize_priority(new_priority or [])
+    old_tokens = _tokenize_priority(old_priority or [])
+    if not new_tokens or not old_tokens:
+        return 0.0
+    intersection = new_tokens & old_tokens
+    union = new_tokens | old_tokens
+    if not union:
+        return 0.0
+    return len(intersection) / len(union)
+
+
+# =============================================================================
+# Continuous productivity score
+# =============================================================================
+#
+# Combines five observed signals (all derivable from state — no LLM
+# self-report dependency for the load-bearing terms) plus rewards for actual
+# progress. Returns a dict with the score and component breakdown so the
+# orchestrator can log *why* a tier fired.
+
+# Verdicts considered "unproductive" for streak/axis counting
+_UNPRODUCTIVE_VERDICTS = frozenset({"no_progress", "duplicate", "blocked"})
+
+
+def _compute_weights(
+    iteration: int,
+    max_iterations: int,
+    phase: str,
+) -> dict:
+    """Compute dynamic weights for the score formula based on session age
+    and phase. Weights shift emphasis from tolerance (early) to urgency
+    (late) and from exploration (informational) to discipline (exploitation).
+
+    The shape: state-growth-stall and axis-repeats become *more* punitive
+    as iterations accumulate; new_info bonus *shrinks* late in a session
+    (you've already had your chance to explore). Phase 'exploitation'
+    bumps axis-repeats further (each shot should be deliberate).
+    """
+    if not max_iterations or max_iterations <= 0:
+        max_iterations = 100
+    bracket = max(0.0, min(1.0, iteration / max_iterations))
+
+    weights = {
+        "w_verdict_count":    1.0,                       # constant
+        "w_state_growth":     1.0 + 2.0 * bracket,       # 1.0 → 3.0
+        "w_axis_repeats":     2.0 + 2.0 * bracket,       # 2.0 → 4.0
+        "w_same_pattern":     0.5,                       # constant; mild
+        "r_new_info":         2.0 - 1.0 * bracket,       # 2.0 → 1.0
+        "r_actionable":       1.0 - 0.5 * bracket,       # 1.0 → 0.5
+    }
+    if phase == "exploitation":
+        weights["w_axis_repeats"] += 1.0
+        weights["w_verdict_count"] += 0.5
+    return weights
+
+
+def _same_pattern_count(execution_trace: list, window: int = 6) -> int:
+    """Max count of any single (tool_name + normalized_args) pattern in the
+    last `window` steps. Reuses the existing fingerprint normalizer."""
+    if not execution_trace:
+        return 0
+    from collections import Counter
+    recent = execution_trace[-window:]
+    sigs = [
+        _normalize_args_pattern(s.get("tool_name"), s.get("tool_args") or {})
+        for s in recent
+    ]
+    if not sigs:
+        return 0
+    return max(Counter(sigs).values())
+
+
+def _unproductive_count(execution_trace: list, window: int = 6) -> int:
+    """Count of unproductive verdicts (or hard failures) in the last `window`
+    steps, mirroring the legacy streak counter logic for backward parity."""
+    if not execution_trace:
+        return 0
+    n = 0
+    for step in execution_trace[-window:]:
+        out_low = ((step.get("tool_output") or "")[:500]).lower()
+        is_keyword_fail = (
+            not step.get("success", True)
+            or "failed" in out_low
+            or "error" in out_low
+        )
+        if is_keyword_fail or is_unproductive(step):
+            n += 1
+    return n
+
+
+def _new_info_events_in_window(execution_trace: list, window: int = 5) -> Tuple[int, int]:
+    """Returns (new_info_count, actionable_count) over the last `window` steps."""
+    if not execution_trace:
+        return 0, 0
+    new_info = 0
+    actionable = 0
+    for step in execution_trace[-window:]:
+        prod = _read_productivity(step)
+        if prod.get("verdict") == "new_info":
+            new_info += 1
+        af = step.get("actionable_findings") or []
+        if af:
+            actionable += 1
+    return new_info, actionable
+
+
+def _max_axis_repeats(tested_axes: dict) -> int:
+    """Max unproductive count across all known axes in the ledger."""
+    if not tested_axes:
+        return 0
+    unproductive = {"no_progress", "duplicate", "blocked", "hard_failure"}
+    best = 0
+    for entries in tested_axes.values():
+        c = sum(1 for e in entries if (e.get("verdict") or "") in unproductive)
+        if c > best:
+            best = c
+    return best
+
+
+def compute_productivity_score(
+    *,
+    execution_trace: list,
+    tested_axes: dict,
+    iterations_since_state_grew: int,
+    iteration: int,
+    max_iterations: int,
+    phase: str = "informational",
+    window: int = 6,
+    new_info_window: int = 5,
+) -> dict:
+    """Compute the continuous productivity score and return a structured
+    breakdown of components and weights. Pure function — no I/O, no state
+    mutation. The caller maps the score to a tier and applies actions.
+
+    Returns:
+        {
+          "score": float,                  # final aggregated score
+          "tier": str,                     # "green" | "yellow" | "orange" | "red" | "critical"
+          "components": {                  # raw signal values (pre-weight)
+            "unproductive_verdicts": int,
+            "iterations_since_state_grew": int,
+            "max_axis_repeats": int,
+            "same_pattern_count": int,
+            "new_info_events": int,
+            "actionable_events": int,
+          },
+          "weights": {...},                # the weights used (post dynamic adjustment)
+          "weighted": {...},               # per-component contribution to score
+        }
+    """
+    weights = _compute_weights(iteration, max_iterations, phase)
+
+    unproductive = _unproductive_count(execution_trace, window=window)
+    stall = max(0, min(int(iterations_since_state_grew or 0), 10))
+    axis_max = _max_axis_repeats(tested_axes or {})
+    same_pat = _same_pattern_count(execution_trace, window=window)
+    new_info, actionable = _new_info_events_in_window(execution_trace, window=new_info_window)
+
+    weighted = {
+        "unproductive_verdicts":      weights["w_verdict_count"] * unproductive,
+        "iterations_since_state_grew": weights["w_state_growth"] * stall,
+        "max_axis_repeats":           weights["w_axis_repeats"] * axis_max,
+        "same_pattern_count":         weights["w_same_pattern"] * same_pat,
+        "new_info_events":          - weights["r_new_info"]     * new_info,
+        "actionable_events":        - weights["r_actionable"]   * actionable,
+    }
+    score = sum(weighted.values())
+    score = max(0.0, score)  # clamp at zero; negatives are just "very healthy"
+
+    return {
+        "score": round(score, 2),
+        "components": {
+            "unproductive_verdicts": unproductive,
+            "iterations_since_state_grew": stall,
+            "max_axis_repeats": axis_max,
+            "same_pattern_count": same_pat,
+            "new_info_events": new_info,
+            "actionable_events": actionable,
+        },
+        "weights": {k: round(v, 2) for k, v in weights.items()},
+        "weighted": {k: round(v, 2) for k, v in weighted.items()},
+    }
+
+
+def tier_for_score(
+    score: float,
+    *,
+    hint_threshold: float = 3.0,
+    deepthink_threshold: float = 5.0,
+    require_pivot_threshold: float = 7.0,
+    block_threshold: float = 9.0,
+) -> str:
+    """Map a numeric score to a tier label. Tiers escalate:
+
+        green     — no action
+        yellow    — inject soft hint into next prompt
+        orange    — fire Deep Think (subject to cooldown + novelty check)
+        red       — require axis_pivot / what_is_different rationale
+        critical  — block next expensive call
+    """
+    if score >= block_threshold:
+        return "critical"
+    if score >= require_pivot_threshold:
+        return "red"
+    if score >= deepthink_threshold:
+        return "orange"
+    if score >= hint_threshold:
+        return "yellow"
+    return "green"
+
+
+# =============================================================================
+# State-growth signal
+# =============================================================================
+
+def detect_state_growth(before_state: dict, after_state: dict) -> bool:
+    """Return True if any of the engagement-state collections grew between
+    snapshots: target_info lists, chain_findings_memory length, or any
+    actionable_findings on the latest step.
+
+    The signal is observed (orchestrator owns the data) — it does not depend
+    on the LLM's self-reported verdict, which is exactly what makes it a
+    reliable "are we still making progress?" indicator.
+    """
+    if _target_info_grew(before_state, after_state):
+        return True
+    before_cfm = len((before_state or {}).get("chain_findings_memory") or [])
+    after_cfm = len((after_state or {}).get("chain_findings_memory") or [])
+    if after_cfm > before_cfm:
+        return True
+    return False
 
 
 def build_productivity_audit_section(

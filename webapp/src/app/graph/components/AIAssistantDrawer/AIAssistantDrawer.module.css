@@ -140,56 +140,6 @@
   background: rgba(139, 92, 246, 0.2);
 }
 
-.deepThinkBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 10px;
-  font-weight: var(--font-semibold);
-  color: #14b8a6;
-  background: rgba(20, 184, 166, 0.12);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(20, 184, 166, 0.4);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  line-height: 1;
-}
-
-.deepThinkToggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 10px;
-  font-weight: var(--font-semibold);
-  color: var(--text-tertiary);
-  background: rgba(255, 255, 255, 0.05);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  line-height: 1;
-  cursor: pointer;
-  transition: var(--transition-all);
-}
-
-.deepThinkToggle:hover {
-  color: #14b8a6;
-  border-color: rgba(20, 184, 166, 0.4);
-  background: rgba(20, 184, 166, 0.08);
-}
-
-.deepThinkToggleActive {
-  color: #14b8a6;
-  background: rgba(20, 184, 166, 0.12);
-  border-color: rgba(20, 184, 166, 0.4);
-}
-
-.deepThinkToggleActive:hover {
-  background: rgba(20, 184, 166, 0.2);
-}
-
 /* Settings dropdown */
 .settingsWrapper {
   position: relative;

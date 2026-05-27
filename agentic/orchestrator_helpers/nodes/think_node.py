@@ -30,7 +30,15 @@ from orchestrator_helpers.config import get_identifiers, is_session_config_compl
 from orchestrator_helpers.llm_retry import retry_llm_call
 from orchestrator_helpers.productivity import (
     audit_productivity_claim,
+    axis_key,
+    axis_unproductive_count,
     build_productivity_audit_section,
+    compute_productivity_score,
+    detect_state_growth,
+    extract_axis,
+    priority_order_jaccard,
+    record_axis_attempt,
+    tier_for_score,
     detect_uniform_response_anomaly,
     downgrade_verdict_to_no_progress,
     is_unproductive,
@@ -120,151 +128,229 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
     # think-loop can seed its tally from them whether deep-think ran or not.
     _dt_in = 0
     _dt_out = 0
+    # Productivity v2 outputs — initialized unconditionally so the final
+    # `updates` block can reference them regardless of whether the Deep
+    # Think branch ran or which sub-path it took.
+    _score_obj = None
+    dt_parsed = None
 
-    if get_setting('DEEP_THINK_ENABLED', False):
-        trigger_reason = None
+    trigger_reason = None
 
-        # Condition 1: first iteration of session
-        if iteration == 1:
-            trigger_reason = "First iteration — establishing initial strategy"
+    # Compute the productivity score every think turn — used both to
+    # decide tier-based Deep Think firing AND to surface diagnostic
+    # signals downstream (logged onto state for streaming/debugging).
+    _exec_trace = state.get("execution_trace", [])
+    _window = int(get_setting('PRODUCTIVITY_AUDIT_WINDOW', 6))
+    _threshold = int(get_setting('UNPRODUCTIVE_STREAK_THRESHOLD', 3))
+    _score_enabled = bool(get_setting('PRODUCTIVITY_SCORE_ENABLED', True))
+    _score_obj = None
+    _tier = "green"
+    if _score_enabled and _exec_trace:
+        try:
+            _score_obj = compute_productivity_score(
+                execution_trace=_exec_trace,
+                tested_axes=state.get("tested_axes", {}),
+                iterations_since_state_grew=state.get("_iterations_since_state_grew", 0),
+                iteration=iteration,
+                max_iterations=state.get("max_iterations", get_setting('MAX_ITERATIONS', 100)),
+                phase=phase,
+                window=_window,
+            )
+            _tier = tier_for_score(
+                _score_obj["score"],
+                hint_threshold=float(get_setting('PRODUCTIVITY_SCORE_HINT_THRESHOLD', 3.0)),
+                deepthink_threshold=float(get_setting('PRODUCTIVITY_SCORE_DEEPTHINK_THRESHOLD', 5.0)),
+                require_pivot_threshold=float(get_setting('PRODUCTIVITY_SCORE_REQUIRE_PIVOT_THRESHOLD', 7.0)),
+                block_threshold=float(get_setting('PRODUCTIVITY_SCORE_BLOCK_THRESHOLD', 9.0)),
+            )
+            _score_obj["tier"] = _tier
+            logger.info(
+                f"[{user_id}/{project_id}/{session_id}] Productivity score "
+                f"{_score_obj['score']} ({_tier}) iter={iteration} "
+                f"components={_score_obj['components']}"
+            )
+        except Exception as _e_score:
+            logger.warning(f"productivity score compute failed: {_e_score}")
+            _score_obj = None
 
-        # Condition 2: phase transition just happened
-        elif just_transitioned:
-            trigger_reason = f"Phase transition to {just_transitioned} — re-evaluating strategy"
+    # Condition 1: phase transition just happened
+    if just_transitioned:
+        trigger_reason = f"Phase transition to {just_transitioned} — re-evaluating strategy"
 
-        # Condition 3: failure / unproductive loop in last N steps
-        # Counts both hard failures (success=False, "failed"/"error" keywords)
-        # AND steps the LLM itself classified as no_progress/duplicate/blocked
-        # via output_analysis.productivity. Catches the "successful but useless"
-        # case (e.g. HTTP 200 with empty body repeated N times) that the
-        # keyword-only check missed.
-        _exec_trace = state.get("execution_trace", [])
-        _window = int(get_setting('PRODUCTIVITY_AUDIT_WINDOW', 6))
-        _threshold = int(get_setting('UNPRODUCTIVE_STREAK_THRESHOLD', 3))
-        if not trigger_reason and len(_exec_trace) >= _threshold:
-            _unproductive_count = 0
-            for _step in _exec_trace[-_window:]:
-                _out = ((_step.get("tool_output") or "")[:500]).lower()
-                _is_keyword_fail = (
-                    not _step.get("success", True)
-                    or "failed" in _out
-                    or "error" in _out
-                    or "exploit completed, but no session" in _out
+    # Condition 2: continuous score crosses Deep Think threshold (subject
+    # to cooldown to avoid Deep-Think-every-turn loops).
+    # When the score path is disabled, fall back to the legacy 3/6 verdict
+    # counter so behaviour is backward-compatible.
+    _cooldown_until = int(state.get("_deep_think_cooldown_until", 0) or 0)
+    _cooldown_active = iteration < _cooldown_until
+    _critical_override = _score_obj and _score_obj["score"] >= float(
+        get_setting('PRODUCTIVITY_SCORE_BLOCK_THRESHOLD', 9.0)
+    )
+    _stall_override = (
+        state.get("_iterations_since_state_grew", 0)
+        >= int(get_setting('STATE_GROWTH_HARD_THRESHOLD', 10))
+    )
+
+    if not trigger_reason and _score_enabled and _score_obj is not None:
+        if _tier in ("orange", "red", "critical") and (
+            not _cooldown_active or _critical_override or _stall_override
+        ):
+            trigger_reason = (
+                f"Productivity tier '{_tier}' (score {_score_obj['score']}) — "
+                f"components: {_score_obj['components']}"
+            )
+    elif not trigger_reason and len(_exec_trace) >= _threshold:
+        # Legacy fallback: 3/6 verdict counter
+        _unproductive_count = 0
+        for _step in _exec_trace[-_window:]:
+            _out = ((_step.get("tool_output") or "")[:500]).lower()
+            _is_keyword_fail = (
+                not _step.get("success", True)
+                or "failed" in _out
+                or "error" in _out
+                or "exploit completed, but no session" in _out
+            )
+            if _is_keyword_fail or is_unproductive(_step):
+                _unproductive_count += 1
+        if _unproductive_count >= _threshold and not _cooldown_active:
+            trigger_reason = (
+                f"Unproductive streak detected ({_unproductive_count}/{_window} "
+                f"recent steps yielded no_progress / duplicate / blocked / failure) "
+                f"— pivoting strategy"
+            )
+
+    # Condition 3: LLM self-requested deep think on previous iteration
+    # — ALWAYS bypasses cooldown (agent should be able to ask for help)
+    if not trigger_reason and state.get("_need_deep_think", False):
+        trigger_reason = "Agent self-assessed stagnation — strategic re-evaluation requested"
+
+    if trigger_reason:
+        try:
+            # Build session config (tunnel/LHOST/LPORT) for deep think context
+            _attack_path = state.get("attack_path_type", "")
+            _is_statefull = get_setting('POST_EXPL_PHASE_TYPE', 'statefull') == 'statefull'
+            _needs_session = (
+                (phase == "exploitation" and _is_statefull)
+                or _attack_path == "phishing_social_engineering"
+            )
+            _session_config = ""
+            if _needs_session:
+                _sc = get_session_config_prompt()
+                if _sc:
+                    _session_config = f"\n{_sc}\n"
+
+            # Build RoE section if enabled
+            _roe_section = ""
+            if get_setting('ROE_ENABLED', False):
+                from prompts.base import build_roe_prompt_section
+                _roe = build_roe_prompt_section()
+                if _roe:
+                    _roe_section = f"\n{_roe}\n"
+
+            deep_think_prompt = DEEP_THINK_PROMPT.format(
+                current_phase=phase,
+                objective=current_objective,
+                attack_path_type=_attack_path,
+                attack_path_behavior=build_attack_path_behavior(_attack_path),
+                phase_definitions=build_phase_definitions(),
+                iteration=iteration,
+                max_iterations=state.get("max_iterations", get_setting('MAX_ITERATIONS', 100)),
+                target_info=target_info_formatted,
+                chain_context=chain_context_formatted,
+                trigger_reason=trigger_reason,
+                todo_list=todo_list_formatted,
+                objective_history=objective_history_formatted,
+                session_config=_session_config,
+                roe_section=_roe_section,
+            )
+
+            dt_response = await llm.ainvoke([
+                SystemMessage(content=deep_think_prompt),
+                HumanMessage(content="Produce the deep think analysis JSON now."),
+            ])
+            dt_raw = normalize_content(dt_response.content).strip()
+            _dt_usage = getattr(dt_response, "usage_metadata", None) or {}
+            _dt_in += int(_dt_usage.get("input_tokens", 0) or 0)
+            _dt_out += int(_dt_usage.get("output_tokens", 0) or 0)
+            # Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
+            if dt_raw.startswith("```"):
+                dt_raw = dt_raw.split("\n", 1)[1] if "\n" in dt_raw else dt_raw[3:]
+                if dt_raw.endswith("```"):
+                    dt_raw = dt_raw[:-3].strip()
+            dt_parsed = DeepThinkResult.model_validate_json(dt_raw)
+
+            # Novelty check: compare new priority_order against the prior
+            # Deep Think's priority_order. If too similar (Jaccard >=
+            # threshold), the new plan is a paraphrase of one that already
+            # failed — prepend a strong warning instead of silently
+            # accepting the rephrased same plan.
+            _prior_priority = state.get("_previous_priority_order")
+            _jaccard = priority_order_jaccard(
+                dt_parsed.priority_order, _prior_priority
+            )
+            _novelty_max = float(get_setting('DEEP_THINK_NOVELTY_JACCARD_MAX', 0.6))
+            _novelty_warning = ""
+            if _prior_priority and _jaccard >= _novelty_max:
+                _novelty_warning = (
+                    f"\n\n> ⚠ **Plan novelty low** (Jaccard {_jaccard:.2f} vs "
+                    f"previous Deep Think). The previous plan did not produce "
+                    f"new information. If you intend to retry an axis, you "
+                    f"MUST state explicitly in your next `output_analysis.rationale` "
+                    f"what specific parameter has changed; otherwise pick a "
+                    f"strategy class not present in the previous priority_order.\n"
                 )
-                if _is_keyword_fail or is_unproductive(_step):
-                    _unproductive_count += 1
-            if _unproductive_count >= _threshold:
-                trigger_reason = (
-                    f"Unproductive streak detected ({_unproductive_count}/{_window} "
-                    f"recent steps yielded no_progress / duplicate / blocked / failure) "
-                    f"— pivoting strategy"
+                logger.info(
+                    f"[{user_id}/{project_id}/{session_id}] Deep Think novelty "
+                    f"warning fired (Jaccard {_jaccard:.2f} >= {_novelty_max})"
                 )
 
-        # Condition 4: LLM self-requested deep think on previous iteration
-        if not trigger_reason and state.get("_need_deep_think", False):
-            trigger_reason = "Agent self-assessed stagnation — strategic re-evaluation requested"
-
-        if trigger_reason:
-            try:
-                # Build session config (tunnel/LHOST/LPORT) for deep think context
-                _attack_path = state.get("attack_path_type", "")
-                _is_statefull = get_setting('POST_EXPL_PHASE_TYPE', 'statefull') == 'statefull'
-                _needs_session = (
-                    (phase == "exploitation" and _is_statefull)
-                    or _attack_path == "phishing_social_engineering"
-                )
-                _session_config = ""
-                if _needs_session:
-                    _sc = get_session_config_prompt()
-                    if _sc:
-                        _session_config = f"\n{_sc}\n"
-
-                # Build RoE section if enabled
-                _roe_section = ""
-                if get_setting('ROE_ENABLED', False):
-                    from prompts.base import build_roe_prompt_section
-                    _roe = build_roe_prompt_section()
-                    if _roe:
-                        _roe_section = f"\n{_roe}\n"
-
-                deep_think_prompt = DEEP_THINK_PROMPT.format(
-                    current_phase=phase,
-                    objective=current_objective,
-                    attack_path_type=_attack_path,
-                    attack_path_behavior=build_attack_path_behavior(_attack_path),
-                    phase_definitions=build_phase_definitions(),
-                    iteration=iteration,
-                    max_iterations=state.get("max_iterations", get_setting('MAX_ITERATIONS', 100)),
-                    target_info=target_info_formatted,
-                    chain_context=chain_context_formatted,
-                    trigger_reason=trigger_reason,
-                    todo_list=todo_list_formatted,
-                    objective_history=objective_history_formatted,
-                    session_config=_session_config,
-                    roe_section=_roe_section,
-                )
-
-                dt_response = await llm.ainvoke([
-                    SystemMessage(content=deep_think_prompt),
-                    HumanMessage(content="Produce the deep think analysis JSON now."),
-                ])
-                dt_raw = normalize_content(dt_response.content).strip()
-                _dt_usage = getattr(dt_response, "usage_metadata", None) or {}
-                _dt_in += int(_dt_usage.get("input_tokens", 0) or 0)
-                _dt_out += int(_dt_usage.get("output_tokens", 0) or 0)
-                # Strip markdown code fences if present (LLMs often wrap JSON in ```json ... ```)
-                if dt_raw.startswith("```"):
-                    dt_raw = dt_raw.split("\n", 1)[1] if "\n" in dt_raw else dt_raw[3:]
-                    if dt_raw.endswith("```"):
-                        dt_raw = dt_raw[:-3].strip()
-                dt_parsed = DeepThinkResult.model_validate_json(dt_raw)
-
-                # Render competing hypotheses prominently. They're the load-
-                # bearing section of deep-think now: each carries a hypothesis,
-                # the evidence behind it, and the single probe that distinguishes
-                # it from the alternatives. The next iteration's system prompt
-                # surfaces this verbatim so the LLM acts on disambiguating tests
-                # rather than confirming its existing belief.
-                if dt_parsed.competing_hypotheses:
-                    hyp_lines = []
-                    for i, h in enumerate(dt_parsed.competing_hypotheses, 1):
-                        hyp_lines.append(
-                            f"  {i}. **{h.hypothesis}**\n"
-                            f"     - Supporting: {h.supporting_evidence}\n"
-                            f"     - Disambiguating probe: {h.disambiguating_probe}"
-                        )
-                    hypotheses_block = (
-                        "**Competing Hypotheses (run a probe that distinguishes them — "
-                        "do not just confirm your favorite):**\n"
-                        + "\n".join(hyp_lines)
-                        + "\n\n"
+            # Render competing hypotheses prominently. They're the load-
+            # bearing section of deep-think now: each carries a hypothesis,
+            # the evidence behind it, and the single probe that distinguishes
+            # it from the alternatives. The next iteration's system prompt
+            # surfaces this verbatim so the LLM acts on disambiguating tests
+            # rather than confirming its existing belief.
+            if dt_parsed.competing_hypotheses:
+                hyp_lines = []
+                for i, h in enumerate(dt_parsed.competing_hypotheses, 1):
+                    hyp_lines.append(
+                        f"  {i}. **{h.hypothesis}**\n"
+                        f"     - Supporting: {h.supporting_evidence}\n"
+                        f"     - Disambiguating probe: {h.disambiguating_probe}"
                     )
-                else:
-                    hypotheses_block = ""
-
-                deep_think_result = (
-                    f"**Situation:** {dt_parsed.situation_assessment}\n\n"
-                    f"{hypotheses_block}"
-                    f"**Attack Vectors:** {', '.join(dt_parsed.attack_vectors_identified)}\n\n"
-                    f"**Approach:** {dt_parsed.recommended_approach}\n\n"
-                    f"**Priority:** {' → '.join(dt_parsed.priority_order)}\n\n"
-                    f"**Risks:** {dt_parsed.risks_and_mitigations}"
+                hypotheses_block = (
+                    "**Competing Hypotheses (run a probe that distinguishes them — "
+                    "do not just confirm your favorite):**\n"
+                    + "\n".join(hyp_lines)
+                    + "\n\n"
                 )
-                deep_think_triggered = True
-                logger.info(f"[{user_id}/{project_id}/{session_id}] Deep Think triggered: {trigger_reason}")
+            else:
+                hypotheses_block = ""
 
-                # Stream to frontend
-                if streaming_callbacks:
-                    streaming_cb = streaming_callbacks.get(session_id)
-                    if streaming_cb:
-                        await streaming_cb.on_deep_think(
-                            trigger_reason=trigger_reason,
-                            analysis=deep_think_result,
-                            iteration=iteration,
-                            phase=phase,
-                        )
-            except Exception as e:
-                logger.warning(f"[{user_id}/{project_id}/{session_id}] Deep Think failed (non-blocking): {e}")
+            deep_think_result = (
+                f"**Situation:** {dt_parsed.situation_assessment}\n\n"
+                f"{hypotheses_block}"
+                f"**Attack Vectors:** {', '.join(dt_parsed.attack_vectors_identified)}\n\n"
+                f"**Approach:** {dt_parsed.recommended_approach}\n\n"
+                f"**Priority:** {' → '.join(dt_parsed.priority_order)}\n\n"
+                f"**Risks:** {dt_parsed.risks_and_mitigations}"
+                f"{_novelty_warning}"
+            )
+            deep_think_triggered = True
+            logger.info(f"[{user_id}/{project_id}/{session_id}] Deep Think triggered: {trigger_reason}")
+
+            # Stream to frontend
+            if streaming_callbacks:
+                streaming_cb = streaming_callbacks.get(session_id)
+                if streaming_cb:
+                    await streaming_cb.on_deep_think(
+                        trigger_reason=trigger_reason,
+                        analysis=deep_think_result,
+                        iteration=iteration,
+                        phase=phase,
+                    )
+        except Exception as e:
+            logger.warning(f"[{user_id}/{project_id}/{session_id}] Deep Think failed (non-blocking): {e}")
     # ─── End Deep Think ──────────────────────────────────────────────────
 
     # Get phase tools with attack path type for dynamic routing
@@ -319,9 +405,9 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
     if deep_think_result:
         system_prompt += DEEP_THINK_SECTION.format(deep_think_result=deep_think_result)
 
-    # Inject Deep Think self-request instruction (only when enabled)
-    if get_setting('DEEP_THINK_ENABLED', False):
-        system_prompt += DEEP_THINK_SELF_REQUEST_INSTRUCTION
+    # Inject Deep Think self-request instruction so the LLM can ask for a
+    # strategic re-evaluation on the next iteration when it senses stagnation.
+    system_prompt += DEEP_THINK_SELF_REQUEST_INSTRUCTION
 
     # Inject the workspace-layout doc on every think step. The block teaches
     # the agent which folder is for what (notes/ = scratch, tool-outputs/ +
@@ -404,6 +490,49 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
                 "Do NOT retry the same approach with adjacent parameters.\n"
             )
 
+    # Productivity v2: surface tiered hints derived from the continuous score.
+    # The score was computed up top (in the Deep Think trigger block). Inject
+    # the appropriate intensity of warning into the prompt — soft hint at
+    # yellow, hard pivot demand at red, explicit block-warning at critical.
+    if _score_obj is not None:
+        _score_val = _score_obj["score"]
+        _tier_val = _score_obj.get("tier", "green")
+        _components = _score_obj.get("components", {})
+        if _tier_val == "yellow":
+            system_prompt += (
+                "\n\n## PRODUCTIVITY HINT (yellow)\n\n"
+                f"Score {_score_val} — engagement state has not grown in "
+                f"{_components.get('iterations_since_state_grew', 0)} iterations. "
+                "Consider whether your current hypothesis is still viable. If "
+                "your last 2-3 probes returned no new information, the next "
+                "probe should change a different parameter than 'how big' or "
+                "'how many' — change the *hypothesis class* or the *target* "
+                "instead.\n"
+            )
+        elif _tier_val == "red":
+            system_prompt += (
+                "\n\n## PRODUCTIVITY HINT (red — pivot required)\n\n"
+                f"Score {_score_val}. State-growth stall = "
+                f"{_components.get('iterations_since_state_grew', 0)}, "
+                f"max axis-repeat = {_components.get('max_axis_repeats', 0)}. "
+                "Your next action MUST be on a different hypothesis class. "
+                "In your `output_analysis.rationale` (or your `thought` before "
+                "the next tool call), name the new hypothesis explicitly and "
+                "state WHY the previous hypothesis class has been ruled out.\n"
+            )
+        elif _tier_val == "critical":
+            system_prompt += (
+                "\n\n## PRODUCTIVITY HINT (critical — blocked axis)\n\n"
+                f"Score {_score_val}. The engagement appears genuinely stuck "
+                f"(stall {_components.get('iterations_since_state_grew', 0)}, "
+                f"axis-repeats {_components.get('max_axis_repeats', 0)}). "
+                "Spawning another expensive call on the same axis will be "
+                "rejected. Either: (a) pick a fundamentally different "
+                "vulnerability class, (b) target a different endpoint / "
+                "credential / user, or (c) emit action='ask_user' to request "
+                "a hint. Do NOT repeat the dominant axis.\n"
+            )
+
     # Productivity audit section: show the model its own recent same-pattern
     # fingerprints. Empty string if fewer than 3 same-pattern recent calls.
     _audit_section = build_productivity_audit_section(
@@ -420,10 +549,10 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
     # the basis of failures that never reached the target layer.
     _anomaly_warning = detect_uniform_response_anomaly(
         exec_trace,
-        window=int(get_setting('UNIFORM_RESPONSE_WINDOW', 8)),
-        min_count=int(get_setting('UNIFORM_RESPONSE_MIN_COUNT', 5)),
+        window=int(get_setting('UNIFORM_RESPONSE_WINDOW', 25)),
+        min_count=int(get_setting('UNIFORM_RESPONSE_MIN_COUNT', 3)),
         duration_threshold_ms=int(
-            get_setting('UNIFORM_RESPONSE_DURATION_MS', 50)
+            get_setting('UNIFORM_RESPONSE_DURATION_MS', 200)
         ),
     )
     if _anomaly_warning:
@@ -769,9 +898,26 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
     # Persist deep think result in state (only when newly triggered)
     if deep_think_triggered:
         updates["deep_think_result"] = deep_think_result
+        # Productivity v2: arm the cooldown so we don't fire another Deep
+        # Think on the very next turn just because the unproductive window
+        # hasn't moved on yet. Critical-score and self-request paths bypass
+        # the cooldown in the trigger logic above.
+        _cooldown_n = int(get_setting('DEEP_THINK_COOLDOWN_ITERATIONS', 5))
+        updates["_deep_think_cooldown_until"] = iteration + max(1, _cooldown_n)
+        # Productivity v2: remember the priority_order for next-turn novelty
+        # comparison.
+        if dt_parsed is not None:
+            try:
+                updates["_previous_priority_order"] = list(dt_parsed.priority_order or [])
+            except Exception:
+                pass
+
+    # Productivity v2: persist the score breakdown for diagnostics / streaming.
+    if _score_obj is not None:
+        updates["_last_productivity_score"] = _score_obj
 
     # Persist LLM self-request for deep think (triggers on next iteration)
-    updates["_need_deep_think"] = decision.need_deep_think if get_setting('DEEP_THINK_ENABLED', False) else False
+    updates["_need_deep_think"] = decision.need_deep_think
 
     # When action is plan_tools, set _current_plan instead of _current_step.
     # When action is deploy_fireteam, set _current_fireteam_plan.
@@ -1005,6 +1151,55 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
             updates["target_info"] = merged_target.model_dump()
             updates["_completed_step"] = pending_step
             updates["messages"] = [AIMessage(content=f"**Step {step_iteration}** [{phase}]\n\n{analysis.interpretation}")]
+
+            # Productivity v2: tick the state-growth counter. Reset to 0 when
+            # any engagement-state collection grew; otherwise increment. This
+            # is the orchestrator-owned "are we still making progress?" signal
+            # that does not depend on LLM self-report.
+            _before_growth_snapshot = {
+                "target_info": state.get("target_info", {}),
+                "chain_findings_memory": state.get("chain_findings_memory", []),
+            }
+            _after_growth_snapshot = {
+                "target_info": merged_target.model_dump(),
+                "chain_findings_memory": chain_findings_mem,
+            }
+            _grew = detect_state_growth(_before_growth_snapshot, _after_growth_snapshot)
+            if _grew:
+                updates["_iterations_since_state_grew"] = 0
+            else:
+                updates["_iterations_since_state_grew"] = int(
+                    state.get("_iterations_since_state_grew", 0) or 0
+                ) + 1
+
+            # Productivity v2: record the completed step on the axis ledger.
+            # `extract_axis` returns None for tool calls that aren't expensive
+            # / repeat-prone enough to track (recon probes, single-shot
+            # curls, etc.) — those are skipped silently.
+            try:
+                _axis = extract_axis(
+                    pending_step.get("tool_name"),
+                    pending_step.get("tool_args") or {},
+                )
+                if _axis:
+                    _verdict_val = (_productivity_dict or {}).get("verdict") or (
+                        "hard_failure" if not pending_step.get("success", True) else "confirmation"
+                    )
+                    _new_axes = record_axis_attempt(
+                        state.get("tested_axes", {}),
+                        axis_key(_axis),
+                        iteration=step_iteration,
+                        verdict=_verdict_val,
+                        tool=pending_step.get("tool_name", ""),
+                    )
+                    updates["tested_axes"] = _new_axes
+                    logger.info(
+                        f"[{user_id}/{project_id}/{session_id}] axis recorded "
+                        f"{axis_key(_axis)} verdict={_verdict_val} "
+                        f"prior_unproductive={axis_unproductive_count(_new_axes, axis_key(_axis))}"
+                    )
+            except Exception as _e_axis:
+                logger.warning(f"axis recording failed: {_e_axis}")
 
         else:
             # LLM didn't return analysis — use raw output as fallback
@@ -1289,6 +1484,49 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
         tool_summary = ", ".join(f"{s.get('tool_name')}({'OK' if s.get('success') else 'FAIL'})" for s in plan_steps)
         overall = analysis.interpretation if analysis else "Plan wave completed"
         updates["messages"] = [AIMessage(content=f"**Wave** [{phase}] {tool_summary}\n\n{overall}")]
+
+        # Productivity v2: tick state-growth and record axes for wave steps.
+        # The wave path was missing these and would have left axis lock-in
+        # invisible in fireteam / plan_tools mode. Mirrors the single-tool
+        # path's logic, applied once per wave.
+        _before_growth_snapshot = {
+            "target_info": state.get("target_info", {}),
+            "chain_findings_memory": state.get("chain_findings_memory", []),
+        }
+        _after_growth_snapshot = {
+            "target_info": merged_target.model_dump(),
+            "chain_findings_memory": chain_findings_mem,
+        }
+        if detect_state_growth(_before_growth_snapshot, _after_growth_snapshot):
+            updates["_iterations_since_state_grew"] = 0
+        else:
+            updates["_iterations_since_state_grew"] = int(
+                state.get("_iterations_since_state_grew", 0) or 0
+            ) + 1
+
+        # Record an axis attempt per wave step that has an extractable axis.
+        # Use the wave-level productivity verdict (all wave steps share it).
+        _current_axes = state.get("tested_axes", {}) or {}
+        _wave_verdict = (
+            (_wave_productivity or {}).get("verdict") if _wave_productivity else None
+        )
+        for _ps in plan_steps:
+            try:
+                _ax = extract_axis(_ps.get("tool_name"), _ps.get("tool_args") or {})
+                if not _ax:
+                    continue
+                _verdict_for_ax = _wave_verdict or (
+                    "hard_failure" if not _ps.get("success", True) else "confirmation"
+                )
+                _current_axes = record_axis_attempt(
+                    _current_axes, axis_key(_ax),
+                    iteration=plan_iteration,
+                    verdict=_verdict_for_ax,
+                    tool=_ps.get("tool_name", ""),
+                )
+            except Exception as _e_ax_wave:
+                logger.warning(f"wave-path axis recording failed: {_e_ax_wave}")
+        updates["tested_axes"] = _current_axes
 
     # Handle different actions
     if decision.action == "complete":

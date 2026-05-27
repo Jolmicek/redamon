@@ -40,6 +40,15 @@ _read_productivity = _prod._read_productivity
 audit_productivity_claim = _prod.audit_productivity_claim
 build_productivity_audit_section = _prod.build_productivity_audit_section
 detect_uniform_response_anomaly = _prod.detect_uniform_response_anomaly
+# Productivity v2 exports
+extract_axis = _prod.extract_axis
+axis_key = _prod.axis_key
+axis_unproductive_count = _prod.axis_unproductive_count
+record_axis_attempt = _prod.record_axis_attempt
+priority_order_jaccard = _prod.priority_order_jaccard
+compute_productivity_score = _prod.compute_productivity_score
+tier_for_score = _prod.tier_for_score
+detect_state_growth = _prod.detect_state_growth
 downgrade_verdict_to_no_progress = _prod.downgrade_verdict_to_no_progress
 is_unproductive = _prod.is_unproductive
 
@@ -961,11 +970,21 @@ class TestDetectUniformResponseAnomalyFiresCorrectly(unittest.TestCase):
         warning = detect_uniform_response_anomaly(trace)
         self.assertIsNotNone(warning)
 
-    def test_fires_on_uniform_4xx_streak(self):
-        """4xx is a real signal (server semantic rejection), not a parse-time
-        crash. The detector still fires because uniform 4xx across different
-        payloads means the layer under test isn't being exercised — the
-        request envelope is the problem."""
+    def test_silent_on_uniform_4xx_streak(self):
+        """4xx is a legitimate semantic rejection — the server DID process
+        the request and gave a real answer (404 = not found, 405 = method
+        not allowed, etc). The detector must NOT fire on uniform 4xx because
+        firing would tell the agent 'your input never reached the layer'
+        when in fact the layer responded conclusively. Firing on benign
+        4xx would also burn the warning's signal value: if the agent gets
+        false-positive 'do not mark this tested' warnings on legitimate
+        404s during recon, it learns to ignore the warning, blunting it
+        for the cases where it's actually true (uniform fast-5xx, shell
+        quoting failures, etc).
+
+        The fire-only-on-diagnostic-failure-classes filter (mirrored from
+        `error_class.is_diagnostic_failure`) is what enforces this — 4xx
+        is excluded from the diagnostic-failure set."""
         trace = [
             _uniform_step(
                 error_class="application_4xx",
@@ -975,8 +994,12 @@ class TestDetectUniformResponseAnomalyFiresCorrectly(unittest.TestCase):
             for _ in range(5)
         ]
         warning = detect_uniform_response_anomaly(trace)
-        self.assertIsNotNone(warning)
-        self.assertIn("application_4xx", warning)
+        self.assertIsNone(
+            warning,
+            "Detector fired on uniform 4xx — that's a false positive. 4xx "
+            "is a legitimate negative result, not a parse-time crash. "
+            "Firing here would teach the agent to ignore real warnings.",
+        )
 
 
 class TestDetectUniformResponseAnomalyStaysSilent(unittest.TestCase):
@@ -1134,6 +1157,273 @@ class TestDetectUniformResponseAnomalyOutputShape(unittest.TestCase):
         ]
         w = detect_uniform_response_anomaly(trace)
         self.assertIn("reachability", w.lower())
+
+
+# =============================================================================
+# Productivity v2 — axis extraction, novelty, score, tiers
+# =============================================================================
+
+
+class TestAxisExtractor(unittest.TestCase):
+    """The axis extractor must collapse 'admin brute force with bigger N'
+    into a single axis key — the XBEN-007 scenario."""
+
+    def test_brute_force_python_three_wordlists_collapse(self):
+        """rockyou-5k, 10k-common, and rockyou-100k against admin → same axis."""
+        script_template = (
+            "import requests\n"
+            "url = 'http://lab-1a6fde19:5003/login'\n"
+            "with open('{wordlist}') as f:\n"
+            "    for pw in f:\n"
+            "        requests.post(url, json={{'username': 'admin', 'password': pw}})\n"
+        )
+        axes = []
+        for wl in ("/usr/share/wordlists/rockyou.txt",
+                   "/usr/share/seclists/10k-most-common.txt",
+                   "/usr/share/wordlists/rockyou.txt"):
+            args = {"code": script_template.format(wordlist=wl),
+                    "language": "python", "filename": "brute"}
+            ax = extract_axis("execute_code", args)
+            self.assertIsNotNone(ax)
+            axes.append(ax)
+        # All three should produce the same axis key
+        keys = {axis_key(a) for a in axes}
+        self.assertEqual(len(keys), 1,
+                         f"axes should collapse, got distinct keys: {keys}")
+        self.assertEqual(axes[0]["family"], "credential_brute_force")
+        self.assertEqual(axes[0]["fixed_user"], "admin")
+
+    def test_different_username_creates_different_axis(self):
+        """Same target, same script shape, different fixed_user → different axes."""
+        script_admin = (
+            "import requests\n"
+            "url = 'http://lab/login'\n"
+            "for pw in passwords:\n"
+            "    requests.post(url, json={'username': 'admin', 'password': pw})\n"
+        )
+        script_user = script_admin.replace("admin", "user")
+        ax1 = extract_axis("execute_code", {"code": script_admin})
+        ax2 = extract_axis("execute_code", {"code": script_user})
+        self.assertIsNotNone(ax1)
+        self.assertIsNotNone(ax2)
+        self.assertNotEqual(axis_key(ax1), axis_key(ax2))
+
+    def test_recon_curl_returns_none(self):
+        """Plain curl probes are NOT tracked — only expensive repeat-prone tools."""
+        ax = extract_axis("execute_curl", {"args": "-s http://lab/robots.txt"})
+        self.assertIsNone(ax)
+
+    def test_job_spawn_unwraps_inner_tool(self):
+        """job_spawn wrapping ffuf should produce a ffuf axis."""
+        ax = extract_axis("job_spawn", {
+            "tool_name": "execute_ffuf",
+            "args": {"args": "-w /usr/share/wordlists/x.txt "
+                             "-u http://lab/FUZZ -mc 200,301"},
+        })
+        self.assertIsNotNone(ax)
+        self.assertEqual(ax["family"], "directory_brute_force")
+
+
+class TestAxisLedger(unittest.TestCase):
+    def test_record_and_count(self):
+        ledger = {}
+        ledger = record_axis_attempt(ledger, "k1", iteration=1, verdict="no_progress", tool="execute_code")
+        ledger = record_axis_attempt(ledger, "k1", iteration=4, verdict="duplicate", tool="execute_code")
+        ledger = record_axis_attempt(ledger, "k1", iteration=8, verdict="new_info", tool="execute_code")
+        self.assertEqual(axis_unproductive_count(ledger, "k1"), 2)
+        self.assertEqual(axis_unproductive_count(ledger, "nonexistent"), 0)
+
+    def test_record_is_immutable(self):
+        ledger = {"k1": [{"iteration": 1, "verdict": "no_progress", "tool": "x"}]}
+        before = dict(ledger)
+        _ = record_axis_attempt(ledger, "k1", iteration=2, verdict="no_progress", tool="x")
+        self.assertEqual(ledger, before, "record_axis_attempt must not mutate input")
+
+
+class TestPriorityOrderJaccard(unittest.TestCase):
+    def test_identical_lists_score_one(self):
+        a = ["Run sqlmap against /login", "Try admin brute-force", "Spawn naabu"]
+        self.assertAlmostEqual(priority_order_jaccard(a, list(a)), 1.0, places=5)
+
+    def test_disjoint_lists_score_zero(self):
+        a = ["XSS dom probe on home.html"]
+        b = ["LFI traversal on download endpoint"]
+        self.assertLess(priority_order_jaccard(a, b), 0.2)
+
+    def test_empty_inputs_score_zero(self):
+        self.assertEqual(priority_order_jaccard([], ["x"]), 0.0)
+        self.assertEqual(priority_order_jaccard(None, None), 0.0)
+
+    def test_paraphrased_plans_score_high(self):
+        a = ["Run admin brute-force with rockyou wordlist", "Spawn naabu port scan"]
+        b = ["Continue admin brute-force with larger rockyou wordlist", "Run naabu"]
+        # Stopwords + numerics are stripped; meaningful overlap should be
+        # at least 0.5 (the project default threshold is 0.6, but >=0.5
+        # is enough to demonstrate the signal is meaningful).
+        self.assertGreaterEqual(priority_order_jaccard(a, b), 0.5)
+
+
+class TestStateGrowthDetector(unittest.TestCase):
+    def test_target_info_grew(self):
+        before = {"target_info": {"ports": []}, "chain_findings_memory": []}
+        after = {"target_info": {"ports": [80]}, "chain_findings_memory": []}
+        self.assertTrue(detect_state_growth(before, after))
+
+    def test_chain_findings_grew(self):
+        before = {"target_info": {}, "chain_findings_memory": []}
+        after = {"target_info": {}, "chain_findings_memory": [{"x": 1}]}
+        self.assertTrue(detect_state_growth(before, after))
+
+    def test_no_growth(self):
+        before = {"target_info": {"ports": [80]}, "chain_findings_memory": [{"x": 1}]}
+        after = dict(before)
+        self.assertFalse(detect_state_growth(before, after))
+
+
+class TestComputeProductivityScore(unittest.TestCase):
+    def _trace_with_unproductive(self, n):
+        return [
+            _make_step(productivity=_verdict("no_progress", gained=False))
+            for _ in range(n)
+        ]
+
+    def test_clean_session_scores_zero(self):
+        trace = [
+            _make_step(productivity=_verdict("new_info", gained=True, what="found endpoint"))
+            for _ in range(3)
+        ]
+        result = compute_productivity_score(
+            execution_trace=trace, tested_axes={},
+            iterations_since_state_grew=0,
+            iteration=3, max_iterations=100, phase="informational",
+        )
+        # 3 new_info events × reward 2.0 = -6.0, clamped to 0
+        self.assertEqual(result["score"], 0.0)
+        self.assertEqual(result["components"]["new_info_events"], 3)
+
+    def test_unproductive_streak_scores_positive(self):
+        trace = self._trace_with_unproductive(5)
+        result = compute_productivity_score(
+            execution_trace=trace, tested_axes={},
+            iterations_since_state_grew=4,
+            iteration=20, max_iterations=100, phase="informational",
+        )
+        self.assertGreater(result["score"], 3.0)
+        self.assertEqual(result["components"]["unproductive_verdicts"], 5)
+        self.assertEqual(result["components"]["iterations_since_state_grew"], 4)
+
+    def test_axis_repeats_dominate_score(self):
+        # Three brute-forces on same axis, all unproductive
+        axes = {
+            "credential_brute_force::admin": [
+                {"iteration": 5, "verdict": "no_progress", "tool": "execute_code"},
+                {"iteration": 12, "verdict": "no_progress", "tool": "execute_code"},
+                {"iteration": 22, "verdict": "no_progress", "tool": "execute_code"},
+            ]
+        }
+        # Trace itself is mostly clean (other probes)
+        trace = [_make_step(productivity=_verdict("new_info", gained=True))]
+        result = compute_productivity_score(
+            execution_trace=trace, tested_axes=axes,
+            iterations_since_state_grew=0,
+            iteration=22, max_iterations=100, phase="informational",
+        )
+        # axis_repeats = 3, weighted ~ 2.0+2.0*(22/100) * 3 = 7.32
+        self.assertGreater(result["score"], 4.0)
+        self.assertEqual(result["components"]["max_axis_repeats"], 3)
+
+    def test_late_session_punishes_more(self):
+        trace = self._trace_with_unproductive(4)
+        axes = {"k": [{"iteration": 1, "verdict": "no_progress", "tool": "x"},
+                      {"iteration": 2, "verdict": "no_progress", "tool": "x"}]}
+        early = compute_productivity_score(
+            execution_trace=trace, tested_axes=axes,
+            iterations_since_state_grew=3,
+            iteration=5, max_iterations=100, phase="informational",
+        )
+        late = compute_productivity_score(
+            execution_trace=trace, tested_axes=axes,
+            iterations_since_state_grew=3,
+            iteration=80, max_iterations=100, phase="informational",
+        )
+        self.assertGreater(late["score"], early["score"],
+                           "late session should score higher for same signals")
+
+    def test_exploitation_phase_punishes_axis_repeats_more(self):
+        axes = {"k": [{"iteration": 1, "verdict": "no_progress", "tool": "x"},
+                      {"iteration": 2, "verdict": "no_progress", "tool": "x"}]}
+        trace = []
+        info_score = compute_productivity_score(
+            execution_trace=trace, tested_axes=axes,
+            iterations_since_state_grew=0, iteration=10,
+            max_iterations=100, phase="informational",
+        )
+        expl_score = compute_productivity_score(
+            execution_trace=trace, tested_axes=axes,
+            iterations_since_state_grew=0, iteration=10,
+            max_iterations=100, phase="exploitation",
+        )
+        self.assertGreater(expl_score["score"], info_score["score"])
+
+
+class TestTierForScore(unittest.TestCase):
+    def test_tier_boundaries(self):
+        self.assertEqual(tier_for_score(0.0), "green")
+        self.assertEqual(tier_for_score(2.9), "green")
+        self.assertEqual(tier_for_score(3.0), "yellow")
+        self.assertEqual(tier_for_score(4.9), "yellow")
+        self.assertEqual(tier_for_score(5.0), "orange")
+        self.assertEqual(tier_for_score(6.9), "orange")
+        self.assertEqual(tier_for_score(7.0), "red")
+        self.assertEqual(tier_for_score(8.9), "red")
+        self.assertEqual(tier_for_score(9.0), "critical")
+        self.assertEqual(tier_for_score(15.0), "critical")
+
+    def test_custom_thresholds(self):
+        # Stricter project: Deep Think fires earlier
+        self.assertEqual(
+            tier_for_score(3.5, hint_threshold=2.0, deepthink_threshold=3.0),
+            "orange",
+        )
+
+
+class TestXBEN007Scenario(unittest.TestCase):
+    """End-to-end scenario test: simulate three brute-force attempts on
+    `admin` across iterations 24, 32, 41 (the XBEN-007 timeline) and verify
+    the axis ledger flags lock-in and the score crosses the block tier."""
+
+    def test_three_brute_forces_against_admin_trigger_critical_tier(self):
+        script = (
+            "import requests\n"
+            "url = 'http://lab-1a6fde19:5003/login'\n"
+            "for pw in passwords:\n"
+            "    requests.post(url, json={'username': 'admin', 'password': pw})\n"
+        )
+        ledger = {}
+        # Three sequential brute-force attempts on the same axis
+        for i, it in enumerate([24, 32, 41]):
+            ax = extract_axis("execute_code", {"code": script + f"  # attempt {i}"})
+            self.assertIsNotNone(ax)
+            ledger = record_axis_attempt(
+                ledger, axis_key(ax), iteration=it,
+                verdict="no_progress", tool="execute_code",
+            )
+        # By the 3rd attempt, the axis count is 3 (all unproductive)
+        ax = extract_axis("execute_code", {"code": script})
+        self.assertEqual(axis_unproductive_count(ledger, axis_key(ax)), 3)
+        # And the score crosses critical when this is observed mid-session
+        result = compute_productivity_score(
+            execution_trace=[
+                _make_step(productivity=_verdict("no_progress", gained=False))
+                for _ in range(4)
+            ],
+            tested_axes=ledger,
+            iterations_since_state_grew=7,
+            iteration=41, max_iterations=100, phase="informational",
+        )
+        tier = tier_for_score(result["score"])
+        self.assertIn(tier, ("red", "critical"),
+                      f"expected red/critical, got {tier} (score={result['score']})")
 
 
 if __name__ == "__main__":

@@ -11,13 +11,14 @@ the target.
 
 `classify_error_class` returns one of:
 
-    success                — succeeded, no embedded error, no 4xx/5xx detected
-    shell_parser_error     — bash/shlex/quoting; request never left the harness
-    transport_error        — DNS/connection/network; request never reached the app
-    tool_internal_error    — tool wrapper itself failed (curl returncode, MCP error)
-    application_4xx        — server returned 4xx (legitimate semantic rejection)
-    application_5xx_fast   — server returned 5xx in <50ms (parse-time / early guard crash)
-    application_5xx_normal — server returned 5xx after >=50ms (DB / business-logic crash)
+    success                          — succeeded, no embedded error, no 4xx/5xx detected
+    shell_parser_error               — bash/shlex/quoting; request never left the harness
+    transport_error                  — DNS/connection/network; request never reached the app
+    tool_internal_error              — tool wrapper itself failed (curl returncode, MCP error)
+    application_4xx                  — server returned 4xx (legitimate semantic rejection)
+    application_5xx_fast             — server returned 5xx in <50ms (localhost-grade parse-time / early guard crash)
+    application_5xx_networked_fast   — server returned 5xx in 50..200ms (parse-time crash with networking overhead)
+    application_5xx_normal           — server returned 5xx after >=200ms (DB / business-logic crash)
 
 Surfaced in `format_chain_context` so the LLM sees, per step, what kind of
 failure happened — not just that something failed.
@@ -101,6 +102,13 @@ _GENERIC_4XX_BODY_MARKERS = (
 )
 
 FAST_RESPONSE_THRESHOLD_MS = 50
+# Networked targets reachable over a docker network (or any non-localhost
+# bridge) add ~50-150ms of round-trip overhead. A parse-time crash that
+# would be <50ms on localhost lands at 100-150ms on these targets and would
+# otherwise get bucketed as `application_5xx_normal` ("DB-level error") even
+# though the input never reached the database. The networked-fast tier
+# preserves the parse-time-crash semantic for these cases.
+NETWORKED_FAST_THRESHOLD_MS = 200
 
 
 def classify_error_class(
@@ -154,6 +162,8 @@ def classify_error_class(
 def _classify_5xx(duration_ms: int) -> str:
     if 0 < duration_ms < FAST_RESPONSE_THRESHOLD_MS:
         return "application_5xx_fast"
+    if 0 < duration_ms < NETWORKED_FAST_THRESHOLD_MS:
+        return "application_5xx_networked_fast"
     return "application_5xx_normal"
 
 
@@ -171,13 +181,14 @@ def _extract_http_status(text: str) -> Optional[int]:
 # One-line human descriptions used by format_chain_context. Keep terse —
 # these render inline next to every tool call in the recent window.
 ERROR_CLASS_HINTS = {
-    "shell_parser_error":    "shell quoting; request never sent",
-    "transport_error":       "network failure; request never reached app",
-    "tool_internal_error":   "tool wrapper error",
-    "application_4xx":       "server semantic rejection",
-    "application_5xx_fast":  "5xx <50ms — parse-time / early-guard crash, input likely never reached business logic",
-    "application_5xx_normal":"5xx — application or DB-level error",
-    "success":               "ok",
+    "shell_parser_error":            "shell quoting broke request; switch to execute_code",
+    "transport_error":               "network failure; request never reached the app",
+    "tool_internal_error":           "tool wrapper failed; request likely never left the harness",
+    "application_4xx":               "server semantic rejection (auth, method, content-type)",
+    "application_5xx_fast":          "parse-time crash <50ms; vector NOT proven negative (input never reached the layer)",
+    "application_5xx_networked_fast":"parse-time crash 50-200ms (networked); vector NOT proven negative",
+    "application_5xx_normal":        "deep crash >=200ms (DB or business-logic error path reached)",
+    "success":                       "ok",
 }
 
 
@@ -194,4 +205,5 @@ def is_diagnostic_failure(error_class: Optional[str]) -> bool:
         "transport_error",
         "tool_internal_error",
         "application_5xx_fast",
+        "application_5xx_networked_fast",
     )

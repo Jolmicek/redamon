@@ -63,8 +63,6 @@ export function AIAssistantDrawer({
   toolPhaseMap,
   stealthMode = false,
   onToggleStealth,
-  deepThinkEnabled = true,
-  onToggleDeepThink,
   onRefetchGraph,
   isOtherChainsHidden = false,
   onToggleOtherChains,
@@ -409,8 +407,6 @@ export function AIAssistantDrawer({
         iterationCount={iterationCount}
         stealthMode={stealthMode}
         onToggleStealth={onToggleStealth}
-        deepThinkEnabled={deepThinkEnabled}
-        onToggleDeepThink={onToggleDeepThink}
         settingsDropdownRef={settingsDropdownRef}
         showSettingsDropdown={showSettingsDropdown}
         setShowSettingsDropdown={setShowSettingsDropdown}
