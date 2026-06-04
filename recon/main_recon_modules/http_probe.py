@@ -551,12 +551,115 @@ def run_banner_grab(recon_data: dict, settings: dict = None) -> Dict:
 # Target Building from Naabu Results
 # =============================================================================
 
-def build_targets_from_naabu(recon_data: dict) -> List[str]:
+# Port classification shared by the URL builders below.
+HTTPS_PORTS = {443, 8443, 4443, 9443, 8843}
+HTTP_PORTS = {80, 8080, 8000, 8888, 8008, 3000, 5000, 9000}
+
+
+def parse_port_spec(spec) -> Set[int]:
+    """Parse a naabu-style port spec ("80,443,8080-8090") into a set of ints.
+
+    Returns an empty set for blank / "full" / "all" / unparseable input, which
+    callers interpret as "no custom-port restriction".
+    """
+    ports: Set[int] = set()
+    if not spec:
+        return ports
+    spec = str(spec).strip().lower()
+    if spec in ("full", "all", "-"):
+        return ports  # treat as "no restriction" — top-ports style scan
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                lo_s, hi_s = part.split("-", 1)
+                lo, hi = int(lo_s), int(hi_s)
+            except ValueError:
+                continue
+            if 0 <= lo <= hi <= 65535:
+                ports.update(range(lo, hi + 1))
+        else:
+            try:
+                p = int(part)
+            except ValueError:
+                continue
+            if 0 <= p <= 65535:
+                ports.add(p)
+    return ports
+
+
+def url_port(url: str) -> int:
+    """Extract the effective port from a URL, defaulting by scheme (80/443).
+
+    Returns -1 when the URL can't be parsed.
+    """
+    m = re.match(r"^(https?)://([^/:]+)(?::(\d+))?", url.strip(), re.IGNORECASE)
+    if not m:
+        return -1
+    scheme, _host, port = m.group(1).lower(), m.group(2), m.group(3)
+    if port:
+        try:
+            return int(port)
+        except ValueError:
+            return -1
+    return 443 if scheme == "https" else 80
+
+
+def _urls_for_host_ports(host: str, ports) -> List[str]:
+    """Build candidate http/https URLs for ``host`` across ``ports`` using the
+    same protocol heuristic as :func:`build_targets_from_naabu`."""
+    urls: List[str] = []
+    for port in sorted(set(ports)):
+        if port == 443:
+            urls.append(f"https://{host}")
+        elif port == 80:
+            urls.append(f"http://{host}")
+        elif port in HTTPS_PORTS:
+            urls.append(f"https://{host}:{port}")
+        elif port in HTTP_PORTS:
+            urls.append(f"http://{host}:{port}")
+        else:
+            # Unknown port — try both protocols
+            urls.append(f"http://{host}:{port}")
+            urls.append(f"https://{host}:{port}")
+    return urls
+
+
+def apply_custom_port_scope(urls: List[str], settings: dict = None) -> Tuple[List[str], int, Set[int]]:
+    """Drop URLs whose port falls outside ``NAABU_CUSTOM_PORTS``.
+
+    This is the hard scope guard for the full ("Start Recon") pipeline: when the
+    user explicitly scopes the scan to a set of ports, httpx must never probe a
+    URL on any other port — even if an upstream source (naabu ``by_host`` or the
+    DNS fallback) leaked one.
+
+    The guard is a no-op when:
+      - no custom ports are configured (top-ports style scan), or
+      - ``HTTPX_ENFORCE_CUSTOM_PORT_SCOPE`` is False (partial recon, which scopes
+        ports via its own modal injection into ``by_host``).
+
+    Returns ``(kept_urls, dropped_count, custom_ports)``. ``kept_urls`` is the
+    input list unchanged when the guard is a no-op.
+    """
+    settings = settings or {}
+    custom_ports = parse_port_spec(settings.get("NAABU_CUSTOM_PORTS", ""))
+    if not custom_ports or not settings.get("HTTPX_ENFORCE_CUSTOM_PORT_SCOPE", True):
+        return urls, 0, custom_ports
+    kept = [u for u in urls if url_port(u) in custom_ports]
+    return kept, len(urls) - len(kept), custom_ports
+
+
+def build_targets_from_naabu(recon_data: dict, settings: dict = None) -> List[str]:
     """
     Build HTTP/HTTPS URLs from Naabu port scan results.
 
     Args:
         recon_data: Dictionary containing naabu scan results
+        settings: Optional settings dict. When ``NAABU_CUSTOM_PORTS`` is set,
+            the DNS fallback honors those ports instead of a hardcoded guess
+            list, so a custom-port scan never manufactures out-of-scope URLs.
 
     Returns:
         List of URLs to probe (e.g., ["http://example.com", "https://example.com:8443"])
@@ -565,9 +668,9 @@ def build_targets_from_naabu(recon_data: dict) -> List[str]:
     naabu_data = recon_data.get("port_scan", {})
 
     # Common HTTPS ports
-    https_ports = {443, 8443, 4443, 9443, 8843}
+    https_ports = HTTPS_PORTS
     # Common HTTP ports
-    http_ports = {80, 8080, 8000, 8888, 8008, 3000, 5000, 9000}
+    http_ports = HTTP_PORTS
 
     if naabu_data:
         for host, data in naabu_data.get("by_host", {}).items():
@@ -598,17 +701,20 @@ def build_targets_from_naabu(recon_data: dict) -> List[str]:
 
     # Fallback: build from DNS data if no naabu results
     if not urls:
-        urls = build_targets_from_dns(recon_data)
+        urls = build_targets_from_dns(recon_data, settings)
 
     return list(set(urls))
 
 
-def build_targets_from_dns(recon_data: dict) -> List[str]:
+def build_targets_from_dns(recon_data: dict, settings: dict = None) -> List[str]:
     """
     Fallback: Build URLs from DNS data when naabu results are not available.
 
-    Probes default ports (80, 443) plus common non-standard HTTP ports
-    that firewalls/rate-limiting may cause naabu to miss.
+    When ``NAABU_CUSTOM_PORTS`` is configured, probe ONLY those ports — the
+    user explicitly scoped the scan, so the fallback must not invent
+    out-of-scope ports (e.g. 443/9000). Otherwise probe default ports
+    (80, 443) plus common non-standard HTTP ports that firewalls/rate-limiting
+    may cause naabu to miss.
 
     Returns:
         List of URLs to probe
@@ -616,17 +722,24 @@ def build_targets_from_dns(recon_data: dict) -> List[str]:
     urls = []
     dns_data = recon_data.get("dns", {})
 
-    # Common non-standard HTTP ports to try when port scan has no results
-    extra_http_ports = [8080, 8000, 8888, 3000, 5000, 9000]
-    extra_https_ports = [8443, 4443, 9443]
+    custom_ports = parse_port_spec((settings or {}).get("NAABU_CUSTOM_PORTS", ""))
 
-    def _add_host(host: str) -> None:
-        urls.append(f"http://{host}")
-        urls.append(f"https://{host}")
-        for port in extra_http_ports:
-            urls.append(f"http://{host}:{port}")
-        for port in extra_https_ports:
-            urls.append(f"https://{host}:{port}")
+    if custom_ports:
+        # Honor the user's explicit port scope — probe exactly those ports.
+        def _add_host(host: str) -> None:
+            urls.extend(_urls_for_host_ports(host, custom_ports))
+    else:
+        # Common non-standard HTTP ports to try when port scan has no results
+        extra_http_ports = [8080, 8000, 8888, 3000, 5000, 9000]
+        extra_https_ports = [8443, 4443, 9443]
+
+        def _add_host(host: str) -> None:
+            urls.append(f"http://{host}")
+            urls.append(f"https://{host}")
+            for port in extra_http_ports:
+                urls.append(f"http://{host}:{port}")
+            for port in extra_https_ports:
+                urls.append(f"https://{host}:{port}")
 
     # Add root domain
     domain = recon_data.get("domain", "")
@@ -1656,7 +1769,7 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
 
     # Prefer naabu results, fallback to DNS
     if recon_data.get("port_scan"):
-        urls = build_targets_from_naabu(recon_data)
+        urls = build_targets_from_naabu(recon_data, settings)
         # build_targets_from_naabu falls back to DNS internally if no ports found
         has_ports = bool(recon_data["port_scan"].get("by_host"))
         if has_ports:
@@ -1664,8 +1777,16 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
         else:
             print(f"[*][httpx] Built {len(urls)} URLs from DNS fallback (Naabu found no open ports)")
     else:
-        urls = build_targets_from_dns(recon_data)
+        urls = build_targets_from_dns(recon_data, settings)
         print(f"[*][httpx] Built {len(urls)} URLs from DNS data (no Naabu results)")
+
+    # Hard port-scope guard: when the user set custom ports, never probe a URL
+    # whose port falls outside that set — belt-and-suspenders even if an
+    # upstream source (naabu by_host, DNS fallback) leaked an out-of-scope port.
+    urls, dropped, custom_ports = apply_custom_port_scope(urls, settings)
+    if dropped:
+        print(f"[*][httpx] Custom-port scope active {sorted(custom_ports)} — "
+              f"dropped {dropped} out-of-scope URL(s)")
 
     if not urls:
         print("[!][httpx] No URLs to probe")

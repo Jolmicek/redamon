@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.14.1] - 2026-06-04
+
+### Fixed
+
+- **Custom Ports ignored, phantom 443/9000 nodes** ([recon/main_recon_modules/http_probe.py](recon/main_recon_modules/http_probe.py)) — when Naabu found no open ports, http_probe's DNS fallback probed a hardcoded port list (80, 443, 8080, 9000, ...) regardless of `NAABU_CUSTOM_PORTS`, so a custom-port scan invented out-of-scope nodes and never probed the requested port. The fallback now probes only the configured custom ports, plus a hard port-scope guard drops any out-of-scope URL before probing. Partial recon opts out (it scopes ports via its own modal injection). The form now shows a red warning that Top Ports is ignored when Custom Ports is set. Fixes [#136](https://github.com/samugit83/redamon/issues/136). Coverage: [recon/tests/test_custom_port_scope.py](recon/tests/test_custom_port_scope.py).
+
+---
+
 ## [4.14.0] - 2026-05-29
 
 ### Added
