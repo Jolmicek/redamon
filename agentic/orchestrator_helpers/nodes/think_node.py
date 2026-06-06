@@ -35,6 +35,8 @@ from orchestrator_helpers.productivity import (
     build_productivity_audit_section,
     compute_productivity_score,
     detect_state_growth,
+    detect_diagnostic_progress,
+    update_stall_counters,
     extract_axis,
     priority_order_jaccard,
     record_axis_attempt,
@@ -319,10 +321,15 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
                         f"     - Disambiguating probe: {h.disambiguating_probe}"
                     )
                 hypotheses_block = (
-                    "**Competing Hypotheses (run a probe that distinguishes them — "
-                    "do not just confirm your favorite):**\n"
+                    "**Competing Hypotheses — your NEXT action MUST be a disambiguating "
+                    "probe, not a commitment to your favorite:**\n"
                     + "\n".join(hyp_lines)
-                    + "\n\n"
+                    + "\n\nRequirement: the next tool call must be one of the "
+                    "`disambiguating probe`s above (or a direct equivalent). Do NOT pick a "
+                    "hypothesis and act on it until a probe has actually ruled the others out. "
+                    "If you genuinely cannot run any probe, say so explicitly in your `thought` "
+                    "and justify why before proceeding. A list of guesses with no executed test "
+                    "is a brainstorm; running the probe is what makes this a real experiment.\n\n"
                 )
             else:
                 hypotheses_block = ""
@@ -484,10 +491,22 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
             system_prompt += (
                 "\n\n## UNPRODUCTIVE STREAK DETECTED\n\n"
                 f"{unproductive_count} of your last {_audit_window} steps yielded no_progress, "
-                "duplicate, blocked, or hard-failure outcomes. You MUST try a completely different "
-                "strategy this turn: switch tool family, switch vulnerability hypothesis, use "
-                "`web_search` for alternative techniques, or use action='ask_user' for guidance. "
-                "Do NOT retry the same approach with adjacent parameters.\n"
+                "duplicate, blocked, or hard-failure outcomes. A streak does NOT prove your "
+                "current technique is wrong — it often means a correct technique is failing for a "
+                "small, fixable reason (wrong flag, wrong encoding, wrong assumption about the "
+                "target). Before you abandon the current approach, you MUST take ONE validation "
+                "step this turn:\n"
+                "  (a) reproduce the last failure in a place you fully control (run your own "
+                "payload locally in your own browser/interpreter) and confirm the tool produced "
+                "what you intended — distinguish 'my technique is wrong' from 'my execution is "
+                "wrong' from 'the environment is noisy';\n"
+                "  (b) run the cheap probe that would tell your competing hypotheses apart "
+                "(e.g. fingerprint the real server/engine before assuming a modern stack); or\n"
+                "  (c) state plainly, in your `thought`, an assumption you have ACTUALLY TESTED "
+                "this run that rules the current approach out.\n"
+                "Only AFTER one of (a)/(b)/(c) may you pivot (switch tool family / vulnerability "
+                "hypothesis, `web_search` for alternatives, or action='ask_user'). Do NOT pivot on "
+                "an untested guess, and do NOT blindly re-send the identical call.\n"
             )
 
     # Productivity v2: surface tiered hints derived from the continuous score.
@@ -1165,12 +1184,23 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
                 "chain_findings_memory": chain_findings_mem,
             }
             _grew = detect_state_growth(_before_growth_snapshot, _after_growth_snapshot)
-            if _grew:
-                updates["_iterations_since_state_grew"] = 0
-            else:
-                updates["_iterations_since_state_grew"] = int(
-                    state.get("_iterations_since_state_grew", 0) or 0
-                ) + 1
+            # Fix 1: debugging a correct-but-failing approach adds no new target
+            # fact, so detect_state_growth alone would mark every fix attempt as
+            # "no progress" and fuel a false unproductive streak. Also reset the
+            # stall counter when this step made *diagnostic* progress (a changed
+            # result / error on a same-approach re-attempt, or a ruled-out cause).
+            # update_stall_counters caps how long diagnostic progress can keep
+            # suppressing the streak, so a dead approach still surfaces.
+            _prev_step = execution_trace[-2] if len(execution_trace) >= 2 else None
+            _diag = detect_diagnostic_progress(_prev_step, pending_step)
+            _new_its, _new_ds = update_stall_counters(
+                state.get("_iterations_since_state_grew", 0),
+                state.get("_diagnostic_progress_streak", 0),
+                grew=_grew, diag=_diag,
+                cap=int(get_setting('DIAGNOSTIC_PROGRESS_MAX_STREAK', 6)),
+            )
+            updates["_iterations_since_state_grew"] = _new_its
+            updates["_diagnostic_progress_streak"] = _new_ds
 
             # Productivity v2: record the completed step on the axis ledger.
             # `extract_axis` returns None for tool calls that aren't expensive
@@ -1497,12 +1527,22 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
             "target_info": merged_target.model_dump(),
             "chain_findings_memory": chain_findings_mem,
         }
-        if detect_state_growth(_before_growth_snapshot, _after_growth_snapshot):
-            updates["_iterations_since_state_grew"] = 0
-        else:
-            updates["_iterations_since_state_grew"] = int(
-                state.get("_iterations_since_state_grew", 0) or 0
-            ) + 1
+        # Fix 1 (wave path): mirror the single-tool path — reset the stall
+        # counter on target-state growth OR diagnostic progress, with the same
+        # cap on how long diagnostic progress may suppress the streak.
+        _wave_trace = updates.get("execution_trace") or state.get("execution_trace") or []
+        _wave_prev = _wave_trace[-2] if len(_wave_trace) >= 2 else None
+        _wave_cur = _wave_trace[-1] if _wave_trace else None
+        _wave_grew = detect_state_growth(_before_growth_snapshot, _after_growth_snapshot)
+        _wave_diag = detect_diagnostic_progress(_wave_prev, _wave_cur)
+        _w_its, _w_ds = update_stall_counters(
+            state.get("_iterations_since_state_grew", 0),
+            state.get("_diagnostic_progress_streak", 0),
+            grew=_wave_grew, diag=_wave_diag,
+            cap=int(get_setting('DIAGNOSTIC_PROGRESS_MAX_STREAK', 6)),
+        )
+        updates["_iterations_since_state_grew"] = _w_its
+        updates["_diagnostic_progress_streak"] = _w_ds
 
         # Record an axis attempt per wave step that has an extractable axis.
         # Use the wave-level productivity verdict (all wave steps share it).

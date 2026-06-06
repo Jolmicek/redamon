@@ -98,6 +98,13 @@ def is_unproductive(step: dict) -> bool:
     p = _read_productivity(step)
     if not p:
         return False
+    if p.get("verdict") == "diagnostic_progress":
+        # Fix 1: debugging a correct-but-failing approach. Learning a sub-cause
+        # (a changed failure mode, a ruled-out hypothesis) is genuine progress,
+        # so it is NEVER unproductive — even though no new *target* fact was
+        # added and new_information_gained may be False. Return early so the
+        # new_information_gained guard below does not re-flag it.
+        return False
     if p.get("verdict") in ("no_progress", "duplicate", "blocked"):
         return True
     if p.get("new_information_gained") is False:
@@ -151,6 +158,10 @@ def audit_productivity_claim(
     if verdict == "new_info" and not state_grew:
         return ("Verdict='new_info' but the engagement state did not grow this "
                 "iteration.")
+    if verdict == "diagnostic_progress" and not (productivity.get("what_was_new") or "").strip():
+        return ("Verdict='diagnostic_progress' but what_was_new is empty — cite "
+                "the ruled-out cause or the changed result, otherwise this is "
+                "no_progress.")
     return None
 
 
@@ -627,14 +638,27 @@ def _compute_weights(
 
 
 def _same_pattern_count(execution_trace: list, window: int = 6) -> int:
-    """Max count of any single (tool_name + normalized_args) pattern in the
-    last `window` steps. Reuses the existing fingerprint normalizer."""
+    """Max count of any single (tool_name + normalized_args + output_fingerprint)
+    pattern in the last `window` steps.
+
+    Fix 2: a "repeat" requires the same input shape AND the same result. Two
+    structurally different payloads (which `_normalize_args_pattern` collapses to
+    the same `<val>` shape) that produced DIFFERENT responses are distinct
+    attempts — legitimate debugging — not loop iterations. Pairing the arg shape
+    with `_output_fingerprint` means only genuinely identical retries (same call,
+    same response) are counted as repeats, which is what "looping" should mean.
+    Note: variants that all produce the *identical* response still collapse to
+    one pattern — that is correct, because identical results mean you are not
+    learning anything from the differences."""
     if not execution_trace:
         return 0
     from collections import Counter
     recent = execution_trace[-window:]
     sigs = [
-        _normalize_args_pattern(s.get("tool_name"), s.get("tool_args") or {})
+        (
+            _normalize_args_pattern(s.get("tool_name"), s.get("tool_args") or {}),
+            _output_fingerprint(s),
+        )
         for s in recent
     ]
     if not sigs:
@@ -649,13 +673,20 @@ def _unproductive_count(execution_trace: list, window: int = 6) -> int:
         return 0
     n = 0
     for step in execution_trace[-window:]:
+        # Prefer the explicit, honesty-audited verdict when the step has one.
+        # The legacy keyword heuristic ("failed"/"error" in the output, or a
+        # non-zero exit) is only a FALLBACK for steps with no verdict — as the
+        # module docstring intends. Without this, a step that made genuine
+        # progress (incl. diagnostic_progress) would be re-flagged as
+        # unproductive whenever its output merely contains the word "error",
+        # which is extremely common while debugging an exploit and would defeat
+        # Fix 1 (see test_genuine_debugging_*).
+        if _read_productivity(step):
+            if is_unproductive(step):
+                n += 1
+            continue
         out_low = ((step.get("tool_output") or "")[:500]).lower()
-        is_keyword_fail = (
-            not step.get("success", True)
-            or "failed" in out_low
-            or "error" in out_low
-        )
-        if is_keyword_fail or is_unproductive(step):
+        if (not step.get("success", True)) or "failed" in out_low or "error" in out_low:
             n += 1
     return n
 
@@ -801,6 +832,94 @@ def detect_state_growth(before_state: dict, after_state: dict) -> bool:
     if after_cfm > before_cfm:
         return True
     return False
+
+
+def detect_diagnostic_progress(prev_step: dict, cur_step: dict) -> bool:
+    """Return True when the current step taught us something that narrows the
+    problem, even if no new *target* fact was added (so detect_state_growth is
+    False). This is what separates genuine debugging of a correct-but-failing
+    approach from idle spinning.
+
+    Counts as diagnostic progress when ANY holds:
+      - the LLM's verdict is 'diagnostic_progress', or its `what_was_new`
+        explicitly cites a ruled-out cause (self-reported, cheap signal);
+      - the step is a RE-ATTEMPT of the same approach as the previous step
+        (same normalized arg shape) that produced a DIFFERENT response
+        fingerprint or a DIFFERENT error_class (observed signal — the last
+        change had an observable effect, i.e. we are learning).
+
+    Guardrails against faking progress:
+      - The observed signal only fires for *same-approach* re-attempts, so a
+        normal pivot to a different tool does not silently reset the stall
+        counter (detect_state_growth / the explicit verdict handle those).
+      - A different-looking payload that yields the *identical* response
+        (same fingerprint) is NOT progress — churning inputs cannot game it.
+    """
+    if not cur_step:
+        return False
+
+    # 1) Self-reported diagnostic learning. Require a cited cause so an empty
+    #    'diagnostic_progress' claim cannot silently reset the stall counter.
+    #    (The orchestrator also downgrades empty claims via
+    #    audit_productivity_claim — this is defense in depth.)
+    p = _read_productivity(cur_step)
+    note = (p.get("what_was_new") or "").strip()
+    if p.get("verdict") == "diagnostic_progress" and note:
+        return True
+    note_l = note.lower()
+    if note_l and ("ruled out" in note_l or "ruled-out" in note_l or "different error" in note_l):
+        return True
+
+    if not prev_step:
+        return False
+
+    # 2) Observed: a re-attempt of the SAME approach with a DIFFERENT result.
+    same_approach = (
+        _normalize_args_pattern(prev_step.get("tool_name"), prev_step.get("tool_args") or {})
+        == _normalize_args_pattern(cur_step.get("tool_name"), cur_step.get("tool_args") or {})
+    )
+    if not same_approach:
+        return False
+    if _output_fingerprint(cur_step) != _output_fingerprint(prev_step):
+        return True
+    if (cur_step.get("error_class") or "") != (prev_step.get("error_class") or ""):
+        return True
+    return False
+
+
+def update_stall_counters(
+    iterations_since_grew,
+    diagnostic_streak,
+    *,
+    grew: bool,
+    diag: bool,
+    cap: int = 6,
+) -> Tuple[int, int]:
+    """Pure decision for the orchestrator's per-step stall bookkeeping. Returns
+    ``(new_iterations_since_grew, new_diagnostic_streak)``.
+
+    Rules:
+      - Real target-state growth resets BOTH counters to 0.
+      - Diagnostic progress (a same-approach re-attempt with a different result,
+        or a cited ruled-out cause) also resets the stall counter to 0 — but only
+        up to ``cap`` consecutive times between two real findings. This bounds
+        the feature: an agent cannot suppress the unproductive streak forever by
+        eking out (or claiming) diagnostic progress on a dead approach. Once the
+        diagnostic budget is spent, the stall counter climbs normally so a
+        genuine stall eventually surfaces and the diagnose-or-pivot prompt fires.
+      - Otherwise the stall counter climbs and the diagnostic streak is kept.
+
+    Extracted from think_node so the combined logic is unit-testable without the
+    node's dependency graph; both the single-tool and wave paths call it.
+    """
+    its = int(iterations_since_grew or 0)
+    ds = int(diagnostic_streak or 0)
+    cap = int(cap)
+    if grew:
+        return 0, 0
+    if diag and ds < cap:
+        return 0, ds + 1
+    return its + 1, ds
 
 
 def build_productivity_audit_section(

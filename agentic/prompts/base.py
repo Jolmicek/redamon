@@ -898,6 +898,12 @@ Use `action="complete"` when the **CURRENT objective** is achieved, NOT the enti
 
 **After success, STOP.** Do NOT verify/re-check, troubleshoot, run extra recon, or perform post-exploitation unless the user explicitly requests it. If output shows success, trust it and complete.
 
+**On failure, VALIDATE before you theorize.** When an exploit fails or returns an unexpected result, do NOT take the first error message at face value and do NOT immediately blame the technique, the tool, or the target. First reproduce your payload in a place you fully control (run it yourself in your own browser/interpreter, or against a local copy) and confirm the tool actually produced what you intended. Then separate three distinct causes before deciding what to do next:
+  - **my technique is wrong** — this class of attack does not apply here;
+  - **my execution is wrong** — right technique, but a bug in how I built/encoded/delivered the payload (a missing flag, wrong encoding, quoting, an unbalanced breakout);
+  - **the environment is noisy** — the error is incidental (background noise, a parse-time crash, a transport hiccup) and is not a verdict on my payload.
+An error you have not reproduced is a clue, not a conclusion. Most "the tool is broken" / "the target must be X" beliefs are actually unvalidated execution bugs. Confirm which of the three it is before pivoting away from an approach that may be one small fix from working.
+
 {tool_args_section}
 
 ### Important Rules:
@@ -950,9 +956,9 @@ Include an `output_analysis` object in your JSON response:
     "exploit_succeeded": false,
     "exploit_details": null,
     "productivity": {{
-        "verdict": "new_info | confirmation | no_progress | blocked | duplicate",
+        "verdict": "new_info | confirmation | no_progress | blocked | duplicate | diagnostic_progress",
         "new_information_gained": true,
-        "what_was_new": "One sentence citing the specific new fact, or empty string if none.",
+        "what_was_new": "One sentence citing the specific new fact (or the ruled-out cause), or empty string if none.",
         "should_repeat_similar_call": false,
         "rationale": "One sentence citing specific evidence from the output."
     }}
@@ -967,9 +973,16 @@ You MUST honestly classify every tool output into one of five verdicts:
   - `no_progress`  — call succeeded but yielded zero usable information.
   - `blocked`      — WAF, 401/403, captcha, rate limit, auth wall.
   - `duplicate`    — output essentially identical to a recent call with similar args.
+  - `diagnostic_progress` — you are DEBUGGING a correct-but-failing approach and this attempt
+    taught you something that narrows the problem, even though no new *target* fact was added:
+    the failure mode changed, a different error appeared, or you ruled a sub-cause out. Cite the
+    ruled-out cause in `what_was_new`. This verdict is NOT counted as unproductive — use it
+    honestly when you are iterating toward a fix, not as a way to dodge a real stall.
 
-Marking 3+ repeated same-pattern calls as `confirmation` is dishonest and will be auto-downgraded
-to `no_progress` by the orchestrator. Be critical of your own progress.
+Marking 3+ repeated same-pattern calls (same call, same result) as `confirmation` or
+`diagnostic_progress` is dishonest and will be auto-downgraded to `no_progress` by the
+orchestrator. `diagnostic_progress` requires a genuinely *different* result or a real ruled-out
+cause. Be critical of your own progress.
 
 **exploit_succeeded = true** ONLY when output shows:
 - A Metasploit session was opened ("session X opened", "Meterpreter session X")
@@ -1056,9 +1069,9 @@ Your `output_analysis` should cover ALL tool outputs holistically. Use this EXAC
       }}
     ],
     "productivity": {{
-        "verdict": "new_info | confirmation | no_progress | blocked | duplicate",
+        "verdict": "new_info | confirmation | no_progress | blocked | duplicate | diagnostic_progress",
         "new_information_gained": true,
-        "what_was_new": "One sentence citing the specific new fact across the wave, or empty if none.",
+        "what_was_new": "One sentence citing the specific new fact across the wave (or the ruled-out cause), or empty if none.",
         "should_repeat_similar_call": false,
         "rationale": "One sentence citing specific evidence from at least one tool output."
     }}
@@ -1073,6 +1086,9 @@ Classify the WAVE as a whole using one of five verdicts:
   - `no_progress`  — all tools succeeded but the wave produced zero usable information.
   - `blocked`      — wave hit WAF / 403 / captcha / rate limit / auth wall.
   - `duplicate`    — outputs essentially identical to a recent wave with similar args.
+  - `diagnostic_progress` — the wave was DEBUGGING a correct-but-failing approach and produced a
+    genuinely different result/error than the last attempt, or ruled a sub-cause out (cite it in
+    `what_was_new`). Not counted as unproductive — use only when truly iterating toward a fix.
 
 If 3+ recent same-pattern waves share the same fingerprint and you have nothing
 new to cite, the verdict is `duplicate` or `no_progress` — `confirmation` is dishonest.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.15.1] - 2026-06-06
+
+### Fixed
+
+- **Productivity loop wrongly pushed agents off correct-but-failing approaches** ([agentic/orchestrator_helpers/productivity.py](agentic/orchestrator_helpers/productivity.py), [agentic/orchestrator_helpers/nodes/think_node.py](agentic/orchestrator_helpers/nodes/think_node.py), [agentic/prompts/base.py](agentic/prompts/base.py), [agentic/state.py](agentic/state.py)) — the unproductive-streak detector treated *debugging* (a fix attempt that adds no new target fact, or whose output merely contains "error") as no-progress, prematurely forcing the agent to pivot. Added a `diagnostic_progress` verdict and stall-counter handling: a same-approach re-attempt with a genuinely different result (or a cited ruled-out cause) now resets the stall counter instead of fuelling the streak, capped (`DIAGNOSTIC_PROGRESS_MAX_STREAK`, default 6) so a dead approach still surfaces. Repeat-detection now keys on output fingerprint, so structurally-similar payloads with different responses count as real attempts. The diagnose-or-pivot prompts now demand one validation step (reproduce / fingerprint / cite a tested assumption) before abandoning a technique. Coverage: [agentic/tests/test_productivity.py](agentic/tests/test_productivity.py).
+
+---
+
 ## [4.15.0] - 2026-06-05
 
 ### Added

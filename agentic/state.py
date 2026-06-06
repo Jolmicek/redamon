@@ -307,7 +307,7 @@ class ProductivityVerdict(BaseModel):
     state delta (findings_grew, extracted_info populated) and downgrades
     dishonest claims to `no_progress` before the loop counter consumes it.
     """
-    verdict: Literal["new_info", "confirmation", "no_progress", "blocked", "duplicate"] = "new_info"
+    verdict: Literal["new_info", "confirmation", "no_progress", "blocked", "duplicate", "diagnostic_progress"] = "new_info"
     new_information_gained: bool = True
     what_was_new: str = Field(default="", description="One sentence; empty if nothing new.")
     should_repeat_similar_call: bool = False
@@ -839,6 +839,11 @@ class AgentState(TypedDict):
     # apart for the 6-step verdict window to catch.
     _deep_think_cooldown_until: int  # iteration number; current_iteration < this → suppress
     _iterations_since_state_grew: int
+    # `_diagnostic_progress_streak` counts consecutive stall-counter resets that
+    # came from *diagnostic* progress (debugging a failing-but-correct approach)
+    # rather than real target-state growth. Capped so diagnostic progress cannot
+    # suppress the unproductive streak forever on a dead approach.
+    _diagnostic_progress_streak: int
     _previous_priority_order: Optional[List[str]]
     tested_axes: dict  # axis_key (str) -> list of {iteration, verdict, tool} dicts
     _last_productivity_score: Optional[dict]  # diagnostic: last computed score + components
@@ -1008,6 +1013,7 @@ def create_initial_state(
         # Productivity scoring v2
         "_deep_think_cooldown_until": 0,
         "_iterations_since_state_grew": 0,
+        "_diagnostic_progress_streak": 0,
         "_previous_priority_order": None,
         "tested_axes": {},
         "_last_productivity_score": None,

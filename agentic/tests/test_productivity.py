@@ -49,8 +49,11 @@ priority_order_jaccard = _prod.priority_order_jaccard
 compute_productivity_score = _prod.compute_productivity_score
 tier_for_score = _prod.tier_for_score
 detect_state_growth = _prod.detect_state_growth
+detect_diagnostic_progress = _prod.detect_diagnostic_progress
 downgrade_verdict_to_no_progress = _prod.downgrade_verdict_to_no_progress
 is_unproductive = _prod.is_unproductive
+_same_pattern_count = _prod._same_pattern_count
+update_stall_counters = _prod.update_stall_counters
 
 
 def _make_step(*, tool="execute_curl", args=None, output="", success=True,
@@ -822,6 +825,40 @@ class TestPromptSchemaSync(unittest.TestCase):
         for verdict in ("new_info", "confirmation", "no_progress", "blocked", "duplicate"):
             self.assertIn(verdict, all_text, f"Missing verdict {verdict!r} from prompts")
 
+    def test_diagnostic_progress_verdict_documented_in_root(self):
+        """Fix 1: the new verdict must be documented in BOTH root sections
+        (single + plan), so the main agent knows it may emit it. Kept separate
+        from the fireteam check, which intentionally does not expose it."""
+        single = self.base.split("PENDING_OUTPUT_ANALYSIS_SECTION = ")[1].split(
+            "PENDING_PLAN_OUTPUTS_SECTION"
+        )[0]
+        plan = self.base.split("PENDING_PLAN_OUTPUTS_SECTION = ")[1]
+        self.assertIn("diagnostic_progress", single)
+        self.assertIn("diagnostic_progress", plan)
+
+    def test_prompt_verdicts_match_model_literal(self):
+        """Guard against drift: every verdict offered in the root prompt schema
+        must be a value the ProductivityVerdict model actually accepts. (Runs
+        only where pydantic is importable; skipped in the stdlib-only path.)"""
+        try:
+            from state import ProductivityVerdict  # noqa
+            import typing
+            allowed = set(typing.get_args(
+                ProductivityVerdict.model_fields["verdict"].annotation))
+        except Exception:
+            self.skipTest("pydantic/state not importable in this environment")
+        # Pull the verdict enum string from the root single section.
+        section = self.base.split("PENDING_OUTPUT_ANALYSIS_SECTION = ")[1].split(
+            "PENDING_PLAN_OUTPUTS_SECTION"
+        )[0]
+        line = [l for l in section.splitlines() if '"verdict"' in l][0]
+        offered = {v.strip() for v in line.split('"verdict":')[1].split('|')}
+        offered = {v.strip().strip('", ') for v in line.split(":", 1)[1].split("|")}
+        offered = {v for v in offered if v.isidentifier()}
+        self.assertTrue(offered.issubset(allowed),
+                        f"prompt offers verdicts not in model: {offered - allowed}")
+        self.assertIn("diagnostic_progress", offered)
+
 
 class TestDowngradeIdempotence(unittest.TestCase):
     """Calling downgrade twice on the same dict must remain coherent: the
@@ -1424,6 +1461,306 @@ class TestXBEN007Scenario(unittest.TestCase):
         tier = tier_for_score(result["score"])
         self.assertIn(tier, ("red", "critical"),
                       f"expected red/critical, got {tier} (score={result['score']})")
+
+
+class TestDiagnosticProgress(unittest.TestCase):
+    """Fix 1: debugging a correct-but-failing approach counts as progress."""
+
+    def _step(self, *, output, args, tool="execute_code", productivity=None,
+              error_class=None):
+        s = _make_step(tool=tool, args=args, output=output, productivity=productivity)
+        if error_class is not None:
+            s["error_class"] = error_class
+        return s
+
+    # NOTE: `_normalize_args_pattern` only collapses standalone digits / long
+    # hex / key=value query strings and truncates at 160 chars; it does NOT turn
+    # an arbitrary JSON string value into <val>. So to exercise the "same
+    # approach" branch deterministically we hold the arg shape constant (same
+    # args) and vary the OUTPUT — which is exactly the debugging signal: the same
+    # kind of call producing a different result.
+    _ARGS = {"code": "JSFUCK_PAYLOAD"}
+
+    def test_same_approach_different_result_is_progress(self):
+        prev = self._step(output="page renders, no alert", args=self._ARGS)
+        cur = self._step(output="Oops: TypeError ...", args=self._ARGS)
+        self.assertTrue(detect_diagnostic_progress(prev, cur))
+
+    def test_same_approach_identical_result_is_not_progress(self):
+        # Same shape, IDENTICAL response -> not progress (cannot be gamed).
+        prev = self._step(output="Sorry you can't use: '`'", args=self._ARGS)
+        cur = self._step(output="Sorry you can't use: '`'", args=self._ARGS)
+        self.assertFalse(detect_diagnostic_progress(prev, cur))
+
+    def test_different_tool_is_not_diagnostic_by_output_alone(self):
+        # A pivot to a different tool that happens to differ in output must NOT
+        # silently reset the stall counter via the observed signal.
+        prev = self._step(tool="execute_curl", output="200 OK", args={"url": "http://t/"})
+        cur = self._step(tool="web_search", output="some results", args={"query": "x"})
+        self.assertFalse(detect_diagnostic_progress(prev, cur))
+
+    def test_explicit_diagnostic_verdict_counts(self):
+        cur = self._step(output="same-ish", args={"code": "z"},
+                         productivity={"verdict": "diagnostic_progress",
+                                       "new_information_gained": False,
+                                       "what_was_new": "ruled out modern-engine theory"})
+        self.assertTrue(detect_diagnostic_progress(None, cur))
+
+    def test_explicit_diagnostic_verdict_without_cause_does_not_count(self):
+        # Layer A: an empty 'diagnostic_progress' claim must NOT reset the stall
+        # counter — otherwise it is trivially gameable to suppress the streak.
+        cur = self._step(output="x", args={"code": "z"},
+                         productivity={"verdict": "diagnostic_progress",
+                                       "new_information_gained": False,
+                                       "what_was_new": ""})
+        self.assertFalse(detect_diagnostic_progress(None, cur))
+
+    def test_ruled_out_phrase_counts(self):
+        cur = self._step(output="x", args={"code": "z"},
+                         productivity={"verdict": "no_progress",
+                                       "new_information_gained": False,
+                                       "what_was_new": "Ruled out the WAF hypothesis"})
+        self.assertTrue(detect_diagnostic_progress(None, cur))
+
+    def test_changed_error_class_counts(self):
+        # Same shape + same body, but a DIFFERENT error_class surfaced.
+        prev = self._step(output="boom", args=self._ARGS, error_class="application_5xx_fast")
+        cur = self._step(output="boom", args=self._ARGS, error_class="transport_error")
+        self.assertTrue(detect_diagnostic_progress(prev, cur))
+
+    def test_diagnostic_progress_verdict_is_not_unproductive(self):
+        # Fix 1: even with new_information_gained=False, diagnostic_progress is
+        # never counted as an unproductive step.
+        step = _make_step(productivity={"verdict": "diagnostic_progress",
+                                        "new_information_gained": False,
+                                        "what_was_new": "ruled out X"})
+        self.assertFalse(is_unproductive(step))
+
+
+class TestSamePatternCountFingerprintAware(unittest.TestCase):
+    """Fix 2: a 'repeat' requires same input shape AND same result."""
+
+    def _trace_jsfuck(self):
+        # The real XBEN-010 debugging trace: 6 execute_code calls that share the
+        # same normalized arg shape (held constant here), with mostly different
+        # responses and two genuine repeats. Old shape-only counting would call
+        # this "6 identical calls"; Fix 2 counts the most-repeated (shape, fp)
+        # pair, which appears only twice.
+        same_args = {"code": "JSFUCK_PAYLOAD"}
+        outs = [
+            "page renders, no alert",      # aaaa
+            "Oops: TypeError ...",         # bbbb
+            "Oops: different error ...",   # cccc
+            "Oops: TypeError ...",         # bbbb (same as #2)
+            "Sorry you can't use: '`'",    # dddd
+            "Sorry you can't use: '`'",    # dddd (literal repeat of #5)
+        ]
+        return [
+            _make_step(tool="execute_code", args=same_args, output=o)
+            for o in outs
+        ]
+
+    def test_distinct_results_not_counted_as_loop(self):
+        # Old behavior would have returned 6 (all collapse to code=<val>).
+        # Fix 2: the most-repeated (shape, fingerprint) pair appears only twice.
+        self.assertEqual(_same_pattern_count(self._trace_jsfuck()), 2)
+
+    def test_true_loop_still_detected(self):
+        # Same call, same response, 4 times -> genuinely looping -> 4.
+        trace = [
+            _make_step(tool="execute_curl", args={"url": "http://t/x"}, output="403 Forbidden")
+            for _ in range(4)
+        ]
+        self.assertEqual(_same_pattern_count(trace), 4)
+
+
+class TestDiagnosticProgressAudit(unittest.TestCase):
+    """Layer B: the honesty audit downgrades empty diagnostic_progress claims."""
+
+    def test_empty_diagnostic_progress_flagged(self):
+        disc = audit_productivity_claim(
+            productivity={"verdict": "diagnostic_progress",
+                          "new_information_gained": False, "what_was_new": ""},
+            extracted_info={}, actionable_findings=[], findings_grew=False,
+        )
+        self.assertIsNotNone(disc)
+        self.assertIn("diagnostic_progress", disc)
+
+    def test_diagnostic_progress_with_cause_not_flagged(self):
+        disc = audit_productivity_claim(
+            productivity={"verdict": "diagnostic_progress",
+                          "new_information_gained": False,
+                          "what_was_new": "ruled out the WAF hypothesis"},
+            extracted_info={}, actionable_findings=[], findings_grew=False,
+        )
+        self.assertIsNone(disc)
+
+    def test_downgraded_empty_claim_is_unproductive_again(self):
+        # End-to-end of Layer A+B: an empty diagnostic_progress claim, once
+        # downgraded to no_progress, is counted as unproductive (so it cannot
+        # both dodge the streak AND fail the audit).
+        prod = {"verdict": "diagnostic_progress", "new_information_gained": False,
+                "what_was_new": ""}
+        disc = audit_productivity_claim(prod, {}, [], False)
+        self.assertIsNotNone(disc)
+        downgraded = downgrade_verdict_to_no_progress(prod, disc)
+        step = _make_step(productivity=downgraded)
+        self.assertTrue(is_unproductive(step))
+
+
+class TestUpdateStallCounters(unittest.TestCase):
+    """Layer C: diagnostic progress resets the stall counter but is capped."""
+
+    def test_real_growth_resets_both(self):
+        self.assertEqual(update_stall_counters(5, 4, grew=True, diag=False), (0, 0))
+        self.assertEqual(update_stall_counters(5, 4, grew=True, diag=True), (0, 0))
+
+    def test_diagnostic_resets_stall_and_increments_streak(self):
+        self.assertEqual(update_stall_counters(3, 0, grew=False, diag=True, cap=6), (0, 1))
+        self.assertEqual(update_stall_counters(3, 2, grew=False, diag=True, cap=6), (0, 3))
+
+    def test_no_progress_climbs(self):
+        self.assertEqual(update_stall_counters(3, 2, grew=False, diag=False), (4, 2))
+
+    def test_cap_stops_suppression(self):
+        # At the cap, diagnostic progress no longer resets the stall counter.
+        self.assertEqual(update_stall_counters(0, 6, grew=False, diag=True, cap=6), (1, 6))
+        self.assertEqual(update_stall_counters(2, 7, grew=False, diag=True, cap=6), (3, 7))
+
+    def test_cap_is_per_run_of_diagnostic_only(self):
+        # Walk a sequence: 6 diagnostic resets, then the 7th must climb.
+        its, ds = 0, 0
+        for _ in range(6):
+            its, ds = update_stall_counters(its, ds, grew=False, diag=True, cap=6)
+        self.assertEqual((its, ds), (0, 6))            # still suppressed at the boundary
+        its, ds = update_stall_counters(its, ds, grew=False, diag=True, cap=6)
+        self.assertEqual((its, ds), (1, 6))            # cap hit -> stall now climbs
+
+    def test_real_growth_after_cap_resets_budget(self):
+        its, ds = update_stall_counters(3, 6, grew=True, diag=True, cap=6)
+        self.assertEqual((its, ds), (0, 0))            # a real finding refills the budget
+
+
+class TestDebuggingDoesNotTriggerStreakIntegration(unittest.TestCase):
+    """Integration: a realistic debugging run (the XBEN-010 shape) must NOT trip
+    the unproductive-streak detector now, while a genuine stall still does.
+
+    Exercises the real interaction of detect_state_growth + detect_diagnostic_
+    progress + update_stall_counters + _same_pattern_count + is_unproductive as
+    the orchestrator wires them, without importing the pydantic-heavy think_node.
+    """
+
+    def _run(self, steps, cap=6):
+        """Replay the orchestrator's per-step stall bookkeeping over a trace of
+        (args, output, productivity) tuples; return the final stall counter and
+        the max same_pattern_count seen — the two inputs that drive the streak."""
+        its, ds = 0, 0
+        trace = []
+        for args, output, prod in steps:
+            step = _make_step(tool="execute_code", args=args, output=output,
+                              productivity=prod)
+            prev = trace[-1] if trace else None
+            trace.append(step)
+            grew = False  # no target facts in a pure debugging run
+            diag = detect_diagnostic_progress(prev, step)
+            its, ds = update_stall_counters(its, ds, grew=grew, diag=diag, cap=cap)
+        return its, _same_pattern_count(trace)
+
+    def test_genuine_debugging_stays_below_streak(self):
+        same = {"code": "JSFUCK_PAYLOAD"}
+        steps = [
+            (same, "page renders, no alert", None),
+            (same, "Oops: TypeError ...", None),
+            (same, "Oops: different error ...", None),
+            (same, "Sorry you can't use: '`'", None),
+            (same, "Congratulations? no — Oops still", None),
+        ]
+        its, same_count = self._run(steps)
+        # Each attempt produced a different result -> diagnostic progress each
+        # time -> stall counter stayed at 0; and no two results are identical so
+        # same_pattern_count is 1. Neither feeds an unproductive streak.
+        self.assertEqual(its, 0)
+        self.assertEqual(same_count, 1)
+
+    def test_genuine_stall_still_climbs(self):
+        same = {"code": "SAME"}
+        # Identical call, identical "blocked" result, 5 times: no diagnostic
+        # progress, so the stall counter climbs and same_pattern_count is high.
+        steps = [(same, "403 Forbidden", None) for _ in range(5)]
+        its, same_count = self._run(steps)
+        self.assertEqual(its, 5)
+        self.assertEqual(same_count, 5)
+
+    def test_capped_diagnostic_churn_eventually_stalls(self):
+        # Alternating two different results forever would reset the stall counter
+        # on every step via the observed branch — the cap stops that.
+        a = {"code": "P"}
+        steps = [(a, "result-A" if i % 2 == 0 else "result-B", None) for i in range(10)]
+        its, _ = self._run(steps, cap=6)
+        self.assertGreater(its, 0)  # cap kicked in; the churn no longer suppresses
+
+
+class TestScoreToTierIntegration(unittest.TestCase):
+    """The real payoff: feed each trace through compute_productivity_score with
+    the stall counter our bookkeeping would produce, and assert the *tier*
+    (which gates Deep Think / the streak) reacts correctly. This closes the gap
+    between the pure counter logic and the score the orchestrator actually acts
+    on."""
+
+    def _stall_after(self, steps, cap=6):
+        its, ds = 0, 0
+        trace = []
+        for item in steps:
+            args, output = item[0], item[1]
+            prod = item[2] if len(item) > 2 else None
+            step = _make_step(tool="execute_code", args=args, output=output,
+                              productivity=prod)
+            prev = trace[-1] if trace else None
+            trace.append(step)
+            diag = detect_diagnostic_progress(prev, step)
+            its, ds = update_stall_counters(its, ds, grew=False, diag=diag, cap=cap)
+        return trace, its
+
+    def test_debugging_run_stays_green(self):
+        same = {"code": "JSFUCK"}
+        # A realistic debugging run: the agent emits diagnostic_progress with a
+        # cited cause, and the tool outputs contain the word "error"/"TypeError"
+        # (as the real XBEN-010 "Oops! ... TypeError" responses did). Neither the
+        # verdict path nor the legacy keyword path may flag these as a streak.
+        def dp(cause):
+            return {"verdict": "diagnostic_progress", "new_information_gained": False,
+                    "what_was_new": cause}
+        steps = [
+            (same, "page renders, no alert", dp("string-only encoding does not fire")),
+            (same, "Oops: TypeError noise", dp("ruled out: payload reaches the bot")),
+            (same, "Oops: a different error", dp("different error -> encoding changed")),
+            (same, "Sorry you can't use backtick", dp("ruled out backtick avenue")),
+            (same, "still Oops, new detail", dp("narrowed to eval-wrap missing")),
+        ]
+        trace, stall = self._stall_after(steps)
+        score = compute_productivity_score(
+            execution_trace=trace, tested_axes={},
+            iterations_since_state_grew=stall,
+            iteration=20, max_iterations=100, phase="exploitation",
+        )
+        tier = tier_for_score(score["score"])
+        self.assertEqual(stall, 0)
+        self.assertEqual(tier, "green",
+                         f"debugging run should stay green, got score={score['score']}")
+
+    def test_true_stall_escalates(self):
+        same = {"code": "SAME"}
+        steps = [(same, "403 Forbidden") for _ in range(6)]
+        trace, stall = self._stall_after(steps)
+        score = compute_productivity_score(
+            execution_trace=trace, tested_axes={},
+            iterations_since_state_grew=stall,
+            iteration=20, max_iterations=100, phase="exploitation",
+        )
+        tier = tier_for_score(score["score"])
+        self.assertGreaterEqual(stall, 6)
+        self.assertIn(tier, ("orange", "red", "critical"),
+                      f"genuine stall should escalate, got score={score['score']}")
 
 
 if __name__ == "__main__":
