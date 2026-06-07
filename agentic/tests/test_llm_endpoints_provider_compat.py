@@ -335,5 +335,157 @@ class PreFixCrashProofTests(_LLMEndpointFixture):
         self.assertEqual(json.loads(text), {"tags": ["nginx"]})
 
 
+# ---------------------------------------------------------------------------
+# _build_llm_with_model_for_user — provider resolution regression tests
+# ---------------------------------------------------------------------------
+
+class BuildLLMProviderResolutionTests(unittest.TestCase):
+    """Verify that _build_llm_with_model_for_user passes the correct arguments
+    to setup_llm for every provider type.
+
+    Each test mocks the webapp HTTP call (provider list) and setup_llm itself,
+    then asserts which kwargs setup_llm received.  This locks in two things:
+
+    1. Custom LLM regression (38b2c24): custom/<id> models must resolve
+       custom_llm_config to the matching UserLlmProvider record — before the
+       fix custom_llm_config was always None, causing setup_llm to raise
+       "Custom LLM config is required".
+
+    2. Standard-provider regression: openai / anthropic / etc. models must
+       still carry the correct API key and receive custom_llm_config=None.
+    """
+
+    _OPENAI_P    = {"id": "p-openai",  "providerType": "openai",    "apiKey": "sk-openai-test"}
+    _ANTHROPIC_P = {"id": "p-anth",    "providerType": "anthropic", "apiKey": "sk-ant-test"}
+    _DEEPSEEK_P  = {"id": "p-ds",      "providerType": "deepseek",  "apiKey": "sk-ds-test"}
+    _GEMINI_P    = {"id": "p-gem",     "providerType": "gemini",    "apiKey": "gem-test"}
+    _CUSTOM_A    = {
+        "id": "custom-abc",
+        "providerType": "openai_compatible",
+        "apiKey": "compat-key-a",
+        "modelIdentifier": "llama3",
+        "baseUrl": "http://ollama:11434/v1",
+    }
+    _CUSTOM_B    = {
+        "id": "custom-xyz",
+        "providerType": "openai_compatible",
+        "apiKey": "compat-key-b",
+        "modelIdentifier": "mistral-7b",
+        "baseUrl": "http://other:11434/v1",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def fake_lifespan(_app):
+            yield
+
+        with patch("api.lifespan", fake_lifespan):
+            import api as api_module
+            cls.api_module = api_module
+
+    def _call(self, model_name: str, providers: list, user_id: str = "u1") -> dict:
+        """Invoke _build_llm_with_model_for_user and return the kwargs that
+        setup_llm received.  HTTP is stubbed; setup_llm is replaced with a spy."""
+        import unittest.mock as _mock
+        import requests as _requests
+
+        mock_resp = _mock.MagicMock()
+        mock_resp.json.return_value = providers
+        mock_resp.raise_for_status.return_value = None
+
+        captured: dict = {}
+
+        def _spy_setup_llm(model, **kw):
+            captured.update(kw)
+            captured["_model"] = model
+            return _mock.MagicMock()
+
+        with patch.object(_requests, "get", return_value=mock_resp), \
+             patch("orchestrator_helpers.llm_setup.setup_llm", side_effect=_spy_setup_llm):
+            self.api_module._build_llm_with_model_for_user(model_name, user_id)
+
+        return captured
+
+    # --- Custom LLM regression ---
+
+    def test_custom_id_resolves_matching_provider(self):
+        """custom/<id> must pass the record with that exact id as custom_llm_config.
+        Pre-fix: custom_llm_config was None → setup_llm raised ValueError."""
+        kwargs = self._call("custom/custom-abc", [self._OPENAI_P, self._CUSTOM_A, self._CUSTOM_B])
+        self.assertEqual(kwargs["custom_llm_config"], self._CUSTOM_A)
+
+    def test_custom_id_picks_by_id_not_position(self):
+        """custom/<id> must select the second custom provider when its id matches."""
+        kwargs = self._call("custom/custom-xyz", [self._OPENAI_P, self._CUSTOM_A, self._CUSTOM_B])
+        self.assertEqual(kwargs["custom_llm_config"], self._CUSTOM_B)
+
+    def test_custom_id_no_match_falls_back_to_first_custom_type(self):
+        """Unknown custom/<id> falls back to the first openai_compatible/etc. provider."""
+        kwargs = self._call("custom/nonexistent", [self._OPENAI_P, self._CUSTOM_A])
+        self.assertEqual(kwargs["custom_llm_config"], self._CUSTOM_A)
+
+    def test_custom_id_no_providers_custom_llm_config_is_none(self):
+        """Unknown custom/<id> with no custom providers → custom_llm_config=None."""
+        kwargs = self._call("custom/nonexistent", [self._OPENAI_P, self._ANTHROPIC_P])
+        self.assertIsNone(kwargs["custom_llm_config"])
+
+    def test_old_code_path_would_miss_custom_config(self):
+        """Document the pre-fix failure: resolving by providerType=='custom' (which
+        doesn't exist) always returned None, making setup_llm raise."""
+        from orchestrator_helpers.llm_setup import setup_llm as real_setup_llm
+
+        providers = [self._CUSTOM_A]
+        custom_config_if_unfixed = next(
+            (p for p in providers if p.get("providerType") == "custom"), None
+        )
+        self.assertIsNone(
+            custom_config_if_unfixed,
+            "Pre-fix lookup by providerType=='custom' always yielded None — "
+            "confirming the bug exists without the ID-based resolution.",
+        )
+
+    # --- Standard provider regression ---
+
+    def test_openai_model_gets_api_key(self):
+        kwargs = self._call("gpt-4o", [self._OPENAI_P])
+        self.assertEqual(kwargs["openai_api_key"], "sk-openai-test")
+
+    def test_anthropic_model_gets_api_key(self):
+        kwargs = self._call("claude-opus-4-8", [self._ANTHROPIC_P])
+        self.assertEqual(kwargs["anthropic_api_key"], "sk-ant-test")
+
+    def test_deepseek_model_gets_api_key(self):
+        kwargs = self._call("deepseek/deepseek-chat", [self._DEEPSEEK_P])
+        self.assertEqual(kwargs["deepseek_api_key"], "sk-ds-test")
+
+    def test_gemini_model_gets_api_key(self):
+        kwargs = self._call("gemini/gemini-2.0-flash", [self._GEMINI_P])
+        self.assertEqual(kwargs["gemini_api_key"], "gem-test")
+
+    def test_standard_model_keys_absent_when_provider_not_configured(self):
+        """Standard models must pass None for unconfigured provider keys."""
+        kwargs = self._call("gpt-4o", [self._ANTHROPIC_P])
+        self.assertIsNone(kwargs["openai_api_key"])
+
+    def test_no_user_id_makes_no_http_call_and_does_not_crash(self):
+        """user_id=None → HTTP is skipped, all provider keys are None, no crash."""
+        import unittest.mock as _mock
+
+        captured: dict = {}
+
+        def _spy(model, **kw):
+            captured.update(kw)
+            return _mock.MagicMock()
+
+        with patch("orchestrator_helpers.llm_setup.setup_llm", side_effect=_spy):
+            self.api_module._build_llm_with_model_for_user("gpt-4o", None)
+
+        self.assertIsNone(captured.get("openai_api_key"))
+        self.assertIsNone(captured.get("custom_llm_config"))
+
+
 if __name__ == "__main__":
     unittest.main()

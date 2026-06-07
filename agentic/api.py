@@ -505,6 +505,9 @@ def _build_llm_with_model_for_user(model_name: str, user_id: Optional[str]):
     qwen_p = _resolve_provider_key(user_providers, "qwen")
     xai_p = _resolve_provider_key(user_providers, "xai")
     mistral_p = _resolve_provider_key(user_providers, "mistral")
+
+    custom_llm_config = _pick_custom_provider(user_providers, model_name)
+
     return setup_llm(
         model_name,
         openai_api_key=(openai_p or {}).get("apiKey"),
@@ -521,6 +524,7 @@ def _build_llm_with_model_for_user(model_name: str, user_id: Optional[str]):
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
         aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
         aws_region=(bedrock_p or {}).get("awsRegion") or "us-east-1",
+        custom_llm_config=custom_llm_config,
     )
 
 
