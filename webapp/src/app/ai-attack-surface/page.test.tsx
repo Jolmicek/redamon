@@ -99,12 +99,21 @@ describe('AI Attack Surface page', () => {
 
   test('opening PyRIT shows the multi-turn strategy block + Max turns', () => {
     render(<AiAttackSurfacePage />)
-    // garak + pyrit both have a Configure button; pyrit is the second.
+    // garak / pyrit / giskard each have a Configure button; pyrit is the second.
     fireEvent.click(screen.getAllByText('Configure')[1])
     expect(screen.getByText('PyRIT — configure run')).toBeTruthy()
     expect(screen.getByText('2. Attack strategies')).toBeTruthy()
     expect(screen.getByText(/Crescendo/)).toBeTruthy()
     expect(screen.getByText('Max turns')).toBeTruthy()
     expect(screen.getByText('Launch PyRIT')).toBeTruthy()
+  })
+
+  test('opening giskard shows the scan detail (Probes block, Launch giskard)', () => {
+    render(<AiAttackSurfacePage />)
+    fireEvent.click(screen.getAllByText('Configure')[2])   // giskard is third
+    expect(screen.getByText('giskard — configure run')).toBeTruthy()
+    expect(screen.getByText('2. Probes')).toBeTruthy()      // scan style -> "Probes"
+    expect(screen.getByText(/Information Disclosure/)).toBeTruthy()
+    expect(screen.getByText('Launch giskard')).toBeTruthy()
   })
 })

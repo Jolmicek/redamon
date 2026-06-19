@@ -4,7 +4,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import {
-  ALL_CARDS, ATTACK_CHIPS, FUTURE_CARDS, GARAK_CARD, PYRIT_CARD,
+  ALL_CARDS, ATTACK_CHIPS, FUTURE_CARDS, GARAK_CARD, PYRIT_CARD, GISKARD_CARD,
   resolveAuth, splitUrl,
   type ChipKey,
 } from './aiAttackSurface'
@@ -40,13 +40,16 @@ describe('cards', () => {
     }
   })
 
-  test('garak + pyrit are available; giskard/promptfoo are greyed (future)', () => {
+  test('garak + pyrit + giskard available; promptfoo greyed (future)', () => {
     expect(GARAK_CARD.available).toBe(true)
     expect(PYRIT_CARD.available).toBe(true)
+    expect(GISKARD_CARD.available).toBe(true)
     expect(FUTURE_CARDS.every((c) => !c.available)).toBe(true)
     expect(ALL_CARDS).toHaveLength(4)
     expect(ALL_CARDS[0]).toBe(GARAK_CARD)
     expect(PYRIT_CARD.probes.map((p) => p.id)).toEqual(['crescendo', 'skeleton_key'])
+    // giskard probes are the scan detector tags
+    expect(GISKARD_CARD.probes.map((p) => p.id)).toEqual(['prompt_injection', 'information_disclosure', 'hallucination'])
   })
 
   test('garak probe families match the documented MVP set', () => {

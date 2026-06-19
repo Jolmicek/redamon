@@ -82,13 +82,30 @@ export const PYRIT_CARD: ToolCard = {
   available: true,
 }
 
-// Future tools — shown greyed until their adapter ships (Steps 7-8).
+// giskard (Step 7) — quality + safety LLM scan. Its "probes" are the detector
+// tags passed to the scan; they flow through the same `probes` field.
+export const GISKARD_CARD: ToolCard = {
+  id: 'giskard',
+  name: 'giskard',
+  license: 'Apache-2.0',
+  style: 'scan',
+  purpose: 'Quality + safety LLM scan',
+  requires: 'chat',
+  chips: ['prompt-injection', 'data-disclosure', 'hallucination'],
+  probes: [
+    { id: 'prompt_injection', label: 'Prompt Injection', chip: 'prompt-injection' },
+    { id: 'information_disclosure', label: 'Information Disclosure', chip: 'data-disclosure' },
+    { id: 'hallucination', label: 'Hallucination', chip: 'hallucination' },
+  ],
+  available: true,
+}
+
+// Future tools — shown greyed until their adapter ships (Step 8).
 export const FUTURE_CARDS: ToolCard[] = [
-  { id: 'giskard', name: 'giskard', license: 'Apache-2.0', style: 'scan', purpose: 'Quality + safety scan', requires: 'chat', chips: ['hallucination', 'bias', 'prompt-injection', 'toxicity', 'data-disclosure'], probes: [], available: false },
   { id: 'promptfoo', name: 'promptfoo', license: 'MIT', style: 'eval', purpose: 'Red-team eval + ASR', requires: 'chat', chips: ['prompt-injection', 'jailbreak', 'data-disclosure', 'toxicity'], probes: [], available: false },
 ]
 
-export const ALL_CARDS: ToolCard[] = [GARAK_CARD, PYRIT_CARD, ...FUTURE_CARDS]
+export const ALL_CARDS: ToolCard[] = [GARAK_CARD, PYRIT_CARD, GISKARD_CARD, ...FUTURE_CARDS]
 // Tools whose detail view + launch are wired in the UI.
 export const ACTIVE_CARDS: ToolCard[] = ALL_CARDS.filter((c) => c.available)
 

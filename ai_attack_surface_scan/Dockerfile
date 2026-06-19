@@ -35,6 +35,11 @@ RUN python -m venv /opt/venv-pyrit \
     && /opt/venv-pyrit/bin/pip install --no-cache-dir -U pip \
     && /opt/venv-pyrit/bin/pip install --no-cache-dir -r /tmp/pyrit-requirements.txt
 
+COPY ai_attack_surface_scan/adapters/giskard/requirements.txt /tmp/giskard-requirements.txt
+RUN python -m venv /opt/venv-giskard \
+    && /opt/venv-giskard/bin/pip install --no-cache-dir -U pip \
+    && /opt/venv-giskard/bin/pip install --no-cache-dir -r /tmp/giskard-requirements.txt
+
 # Copy the scanner (spine + adapters). The runner scripts are invoked by their
 # tool's venv; the spine runs in the base interpreter.
 COPY ai_attack_surface_scan/ ./ai_attack_surface_scan/
@@ -44,6 +49,7 @@ RUN mkdir -p ai_attack_surface_scan/output
 # Per-tool interpreter paths (adapters default to these; overridable for dev).
 ENV GARAK_PYTHON=/opt/venv-garak/bin/python
 ENV PYRIT_PYTHON=/opt/venv-pyrit/bin/python
+ENV GISKARD_PYTHON=/opt/venv-giskard/bin/python
 ENV PYTHONPATH=/app/ai_attack_surface_scan
 ENV PYTHONUNBUFFERED=1
 

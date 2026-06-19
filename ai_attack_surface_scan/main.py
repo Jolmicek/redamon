@@ -83,6 +83,27 @@ def run_tool(cfg, targets) -> list:
                 print(f"    [!] pyrit failed on {t.url}: {e}")
         return findings
 
+    if cfg.tool == "giskard":
+        from adapters.giskard import run as run_giskard
+        out_base = Path("/app/ai_attack_surface_scan/output") / (cfg.run_id or "dev")
+        findings = []
+        for t in targets:
+            gdir = out_base / "giskard" / _safe_slug(f"{t.baseurl}{t.path}")
+            try:
+                findings.extend(run_giskard(
+                    t, cfg.bounds, str(gdir), cfg.run_id,
+                    judge_base_url=cfg.judge_base_url or None,
+                    detectors=cfg.probes or None,   # probes carries the detector selection
+                    target_model=cfg.target_model or None,
+                    api_key=cfg.api_key or None,
+                    auth_header=cfg.auth_header or None,
+                    auth_scheme=cfg.auth_scheme or None,
+                ))
+            except Exception as e:
+                log.exception(f"giskard failed on {t.url}: {e}")
+                print(f"    [!] giskard failed on {t.url}: {e}")
+        return findings
+
     # Default: the Step-2 skeleton (no tool) — one dummy finding per target.
     return [make_dummy_finding(t, cfg.tool, cfg.run_id) for t in targets]
 
