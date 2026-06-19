@@ -1,8 +1,9 @@
 """AI Attack Surface scan — container entrypoint (Step 2: skeleton).
 
-Control flow (shared spine; no tool yet):
-  [Phase 1] Target loading   — read selected AI nodes from the graph
-  [Phase 2] Safety / bounds  — RoE + bounds + hard-guardrail floor
+Control flow (shared spine; no tool yet). Phases are numbered in execution
+order so the orchestrator's SSE progress only ever advances:
+  [Phase 1] Safety / bounds  — RoE + bounds + hard-guardrail floor (fail fast)
+  [Phase 2] Target loading   — read selected AI nodes from the graph
   [Phase 3] Attack           — (skeleton) emit one dummy finding per target
   [Phase 4] Findings         — normalize -> Vulnerability, link to Endpoint
 
@@ -39,8 +40,8 @@ def run() -> int:
         print("[!] ERROR: PROJECT_ID and USER_ID are required")
         return 1
 
-    # [Phase 2] Safety / bounds — fail fast before touching the graph or target.
-    print("[Phase 2] Safety / bounds")
+    # [Phase 1] Safety / bounds — fail fast before touching the graph or target.
+    print("[Phase 1] Safety / bounds")
     try:
         enforce(cfg)
     except SafetyError as e:
@@ -54,8 +55,8 @@ def run() -> int:
             return 1
 
         with driver.session() as session:
-            # [Phase 1] Target loading
-            print("[Phase 1] Target loading")
+            # [Phase 2] Target loading
+            print("[Phase 2] Target loading")
             targets = load_targets(
                 session,
                 user_id=cfg.user_id,
