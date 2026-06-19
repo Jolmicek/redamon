@@ -123,6 +123,24 @@ container_manager: ContainerManager = None
 # On-demand local LLM (Ollama) judge/attacker for the AI Attack Surface layer
 local_llm_manager: LocalLlmManager = None
 
+# How often the background reaper refreshes AI-attack states (releases orphaned
+# Ollama leases from runs whose UI disconnected before completion).
+AI_ATTACK_REAP_INTERVAL_S = int(os.environ.get("AI_ATTACK_REAP_INTERVAL", "30"))
+
+
+async def _ai_attack_reaper():
+    """Periodically release Ollama leases from finished-but-unpolled runs."""
+    try:
+        while True:
+            await asyncio.sleep(AI_ATTACK_REAP_INTERVAL_S)
+            if container_manager:
+                try:
+                    await container_manager.reap_ai_attack()
+                except Exception as e:
+                    logger.warning(f"AI attack reaper iteration failed: {e}")
+    except asyncio.CancelledError:
+        pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -134,8 +152,10 @@ async def lifespan(app: FastAPI):
     local_llm_manager = LocalLlmManager(client=container_manager.client)
     # The AI Attack Surface lifecycle ref-counts an Ollama judge lease through it.
     container_manager.local_llm_manager = local_llm_manager
+    reaper = asyncio.create_task(_ai_attack_reaper())
     yield
     logger.info("Shutting down Recon Orchestrator...")
+    reaper.cancel()
     if local_llm_manager:
         local_llm_manager.shutdown()
     await container_manager.cleanup()

@@ -1211,6 +1211,25 @@ class ContainerManager:
 
         return state
 
+    async def reap_ai_attack(self) -> int:
+        """Refresh every AI-attack state so a job that finished while no client
+        was polling still releases its Ollama judge lease and is cleaned up.
+
+        Without this, a launch whose UI tab closed mid-run would leave the
+        finished container's lease held forever (Ollama RAM never freed until the
+        orchestrator restarts), because lease release is otherwise client-driven
+        (only get_status / get_all / stream call _refresh). Called periodically by
+        a background task in the API lifespan.
+        """
+        reaped = 0
+        for pid in list(self.ai_attack_states.keys()):
+            try:
+                await self.get_all_ai_attack_surface_statuses(pid)
+                reaped += 1
+            except Exception as e:
+                logger.warning(f"AI attack reaper error for {pid}: {e}")
+        return reaped
+
     def _parse_ai_attack_log_line(self, line: str, current_phase: Optional[str], current_phase_num: Optional[int], timestamp: Optional[datetime] = None) -> AiAttackSurfaceLogEvent:
         """Parse an AI Attack Surface log line and detect [Phase N] changes."""
         if timestamp is None:

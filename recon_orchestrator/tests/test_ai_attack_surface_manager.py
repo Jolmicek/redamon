@@ -219,6 +219,28 @@ class TestStartStop(unittest.IsolatedAsyncioTestCase):
         self.mgr.local_llm_manager.release.assert_called_once()
 
 
+class TestReaper(unittest.IsolatedAsyncioTestCase):
+    async def test_reaper_releases_orphaned_lease(self):
+        # A run that finished while no client polled: status still RUNNING in
+        # memory, container exited, lease still held. The reaper must release it.
+        mgr = make_manager()
+        state = AiAttackSurfaceState(
+            project_id="p", run_id="r", status=AiAttackSurfaceStatus.RUNNING,
+            container_id="c0ffee", llm_leased=True)
+        mgr.ai_attack_states = {"p": {"r": state}}
+        mgr.client.containers.get.return_value = fake_container(status="exited", exit_code=0)
+
+        reaped = await mgr.reap_ai_attack()
+        self.assertEqual(reaped, 1)
+        self.assertEqual(state.status, AiAttackSurfaceStatus.COMPLETED)
+        self.assertFalse(state.llm_leased)
+        mgr.local_llm_manager.release.assert_called_once()
+
+    async def test_reaper_noop_when_no_runs(self):
+        mgr = make_manager()
+        self.assertEqual(await mgr.reap_ai_attack(), 0)
+
+
 class TestGetAll(unittest.IsolatedAsyncioTestCase):
     async def test_auto_cleans_old_completed(self):
         mgr = make_manager()
