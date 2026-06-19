@@ -2931,13 +2931,37 @@ walkthrough (per-workload input/output nodes, settings, developer guide).
 Deterministic `id` (`aisr_<sha16>`); linked to the MCP `Endpoint` via
 `HAS_VULNERABILITY` (fallback BaseURL → Subdomain → Domain).
 
+**New `Vulnerability` sources — `garak` / `pyrit` / `giskard`** (AI Attack Surface,
+the operator-launched deterministic offensive-testing layer): tests the discovered
+LLM endpoints and writes normalized `Vulnerability` findings (zero new labels).
+`source` ∈ {`garak`, `pyrit`, `giskard`} (`promptfoo` later). Properties:
+
+| Property | Meaning |
+|---|---|
+| `source` | the tool: `garak` (single-shot probes) / `pyrit` (bounded multi-turn) / `giskard` (quality+safety scan) |
+| `type` | `ai_attack_<chip>`, e.g. `ai_attack_jailbreak`, `ai_attack_prompt_injection` |
+| `ai_owasp_llm_id` | `LLM01`..`LLM10` |
+| `ai_asr` | attack success rate over trials (0–1); giskard issues are binary (`1.0`) |
+| `ai_trials` | trials / objectives / examples evaluated |
+| `ai_oracle_kind` | how success was scored: `classifier` / `judge_llm` / `contains` / `regex` / `length` / `latency` |
+| `ai_payload_class` | e.g. `garak-dan`, `pyrit-crescendo`, `giskard-LLMPromptInjectionDetector` |
+| `ai_probe_pack_version` | tool+version for reproducibility, e.g. `garak/0.15.1`, `pyrit/0.14.0`, `giskard/2.19.1` |
+| `ai_transcript_ref` | path to the saved native report on disk (`ai_attack_surface_scan/output/{run_id}/{tool}/…`) |
+| `ai_target_url` | the attacked URL (so a custom off-graph target still displays a target) |
+
+Deterministic `id` (`aiatk_<sha16>`, keyed on source + OWASP-LLM id + payload_class +
+target → re-runs MERGE rather than duplicate; the same vuln found by two tools dedups
+on the payload class). Linked to the attacked `Endpoint` via `HAS_VULNERABILITY`
+(fallback BaseURL → Subdomain → Domain), so AI-attack findings sit next to
+nuclei/GVM findings in the RedZone tables and the main report.
+
 ### Properties reserved for later laps
 
 Documented here so the prefix convention stays coherent as later laps land. Empty / `IS NULL` until the relevant lap ships.
 
 | Node label | Reserved property | Lap |
 |---|---|---|
-| `Vulnerability` | `ai_asr`, `ai_trials`, `ai_oracle_kind`, `ai_transcript_ref` | ai_guardrail_probe lap |
+| `Vulnerability` | `ai_asr`, `ai_trials`, `ai_oracle_kind`, `ai_transcript_ref`, `ai_payload_class`, `ai_probe_pack_version`, `ai_target_url` | ✅ **SHIPPED** — AI Attack Surface (garak/pyrit/giskard, see section above) |
 | `CVE` | `is_ai_library` | vuln_scan AI library lookup lap |
 | `Secret` / `TrufflehogFinding` / `GithubSecret` | `ai_provider` | trufflehog / github-secret-hunt AI detector lap |
 | `JsReconFinding` | `finding_type` values `ai-sdk-client`, `ai-sdk-key-literal`, `ai-sdk-browser-allowed`, `ai-frontend-detected` | js_recon AI SDK lap |
