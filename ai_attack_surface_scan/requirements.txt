@@ -1,0 +1,4 @@
+# AI Attack Surface scan — skeleton (Step 2).
+# Only the Neo4j driver for the spine. The heavy tool stack (garak, PyRIT,
+# giskard, promptfoo) is added per-adapter in later steps.
+neo4j>=5.0.0
