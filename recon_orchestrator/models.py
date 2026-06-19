@@ -277,6 +277,9 @@ class AiAttackSurfaceStartRequest(BaseModel):
     bounds: dict = {}                          # {trials, asr_threshold, judge_model, max_turns}
     roe_confirmed: bool = False                # a launch is a confirmed action (§10)
     dry_run: bool = False
+    probes: list[str] = []                     # per-tool probe/plugin selection (garak families, etc.)
+    target_model: str = ""                     # model id the target serves (else derived from recon)
+    api_key: str = ""                          # optional bearer key for an authenticated target
 
 
 class AiAttackSurfaceState(BaseModel):

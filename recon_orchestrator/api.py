@@ -907,6 +907,9 @@ async def start_ai_attack_surface(project_id: str, request: AiAttackSurfaceStart
         "bounds": request.bounds,
         "roe_confirmed": request.roe_confirmed,
         "dry_run": request.dry_run,
+        "probes": request.probes,
+        "target_model": request.target_model,
+        "api_key": request.api_key,
         "user_id": request.user_id,
         "webapp_api_url": request.webapp_api_url,
     }

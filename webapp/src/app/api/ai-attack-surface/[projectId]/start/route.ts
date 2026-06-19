@@ -1,0 +1,60 @@
+import { NextRequest, NextResponse } from 'next/server'
+import prisma from '@/lib/prisma'
+
+const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
+const WEBAPP_URL = process.env.WEBAPP_URL || 'http://localhost:3000'
+
+interface RouteParams {
+  params: Promise<{ projectId: string }>
+}
+
+// POST /api/ai-attack-surface/{projectId}/start
+// Launch one AI Attack Surface tool against the selected AI nodes.
+export async function POST(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { projectId } = await params
+    const body = await request.json()
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true, userId: true },
+    })
+    if (!project) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    const response = await fetch(`${RECON_ORCHESTRATOR_URL}/ai-attack-surface/${projectId}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_id: projectId,
+        user_id: project.userId,
+        webapp_api_url: WEBAPP_URL,
+        tool: body.tool || 'garak',
+        targets: body.targets || [],
+        bounds: body.bounds || {},
+        roe_confirmed: body.roe_confirmed ?? false,
+        dry_run: body.dry_run ?? false,
+        probes: body.probes || [],
+        target_model: body.target_model || '',
+        api_key: body.api_key || '',
+      }),
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      return NextResponse.json(
+        { error: errorData.detail || 'Failed to start AI Attack Surface scan' },
+        { status: response.status },
+      )
+    }
+
+    return NextResponse.json(await response.json())
+  } catch (error) {
+    console.error('Error starting AI Attack Surface scan:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Internal server error' },
+      { status: 500 },
+    )
+  }
+}
