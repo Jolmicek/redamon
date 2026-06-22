@@ -472,7 +472,7 @@ Where the recon pipeline **finds** the AI surface, the **AI Gauntlet attacks it*
 
 It is **deterministic** (seeds, fixed bounds, pinned tool versions) and runs with **zero external egress**: every judge / grader / embedding call is forced to a local Ollama model, so no payload or transcript ever leaves your machine. Off by default and RoE-gated, with live phase-by-phase progress, and findings surfaced in the Red Zone **AI Gauntlet Vulnerabilities** table and the pentest report.
 
-> **[Wiki: AI Gauntlet](https://github.com/samugit83/redamon/wiki/AI-Gauntlet)** | **[Technical: AI_ATTACK_SURFACE.md](readmes/AI_ATTACK_SURFACE.md)**
+> **[Wiki: AI Gauntlet](https://github.com/samugit83/redamon/wiki/AI-Gauntlet)** | **[Technical: AI_GAUNTLET_TECH_DOC.md](readmes/AI_GAUNTLET_TECH_DOC.md)**
 
 ### GVM Vulnerability Scanner
 
