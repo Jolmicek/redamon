@@ -17,7 +17,7 @@ WORKDIR /app
 
 # Build tools some tool wheels need at install time. (Kept in the image; a future
 # optimization could strip build-essential after the venvs are built to slim it.)
-RUN apt-get update && apt-get install -y --no-install-recommends git build-essential \
+RUN apt-get update && apt-get install -y --no-install-recommends git build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Base (shared spine): just the Neo4j driver ---
@@ -31,9 +31,16 @@ RUN python -m venv /opt/venv-garak \
     && /opt/venv-garak/bin/pip install --no-cache-dir -r /tmp/garak-requirements.txt
 
 COPY ai_attack_surface_scan/adapters/pyrit/requirements.txt /tmp/pyrit-requirements.txt
+# pyrit pulls base2048, which ships no arm64/aarch64 wheel and compiles a small
+# Rust extension from source. Provide a Rust toolchain ONLY for this build and
+# remove it in the same layer so the image stays slim (on amd64 a prebuilt wheel
+# exists and the toolchain simply goes unused).
 RUN python -m venv /opt/venv-pyrit \
     && /opt/venv-pyrit/bin/pip install --no-cache-dir -U pip \
-    && /opt/venv-pyrit/bin/pip install --no-cache-dir -r /tmp/pyrit-requirements.txt
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && . "$HOME/.cargo/env" \
+    && /opt/venv-pyrit/bin/pip install --no-cache-dir -r /tmp/pyrit-requirements.txt \
+    && rustup self uninstall -y
 
 COPY ai_attack_surface_scan/adapters/giskard/requirements.txt /tmp/giskard-requirements.txt
 RUN python -m venv /opt/venv-giskard \

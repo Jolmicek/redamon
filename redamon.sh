@@ -760,9 +760,8 @@ cmd_update() {
     local restart_only=()
 
     if [[ "$rebuild_all" == "true" ]]; then
-        info "docker-compose.yml changed -- rebuilding all images"
+        info "docker-compose.yml changed -- rebuilding core service images"
         rebuild_core=(recon-orchestrator kali-sandbox agent webapp docker-broker)
-        rebuild_tools=(recon vuln-scanner github-secret-hunter trufflehog-scanner ai-attack-surface)
     else
         # webapp: always needs rebuild (no volume mount in production)
         if echo "$changed_files" | grep -q "^webapp/"; then
@@ -797,40 +796,48 @@ cmd_update() {
         if echo "$changed_files" | grep -q "^docker_broker/"; then
             rebuild_core+=(docker-broker)
         fi
+    fi
 
-        # Tool-profile images (build-only, not running containers)
-        if echo "$changed_files" | grep -q "^recon/"; then
-            rebuild_tools+=(recon)
-        fi
-        if echo "$changed_files" | grep -q "^gvm_scan/"; then
-            rebuild_tools+=(vuln-scanner)
-        fi
-        if echo "$changed_files" | grep -q "^github_secret_hunt/"; then
-            rebuild_tools+=(github-secret-hunter)
-        fi
-        if echo "$changed_files" | grep -q "^trufflehog_scan/"; then
-            rebuild_tools+=(trufflehog-scanner)
-        fi
-        if echo "$changed_files" | grep -q "^baddns_scan/"; then
-            rebuild_tools+=(baddns-scanner)
-        fi
-
-        # ai-attack-surface: heavy build-only image (Node + promptfoo + per-tool
-        # venvs). The adapter .py files are volume-mounted into the scan container
-        # at spawn (hot-reload, no rebuild); ONLY the baked-in toolchain — the
-        # Dockerfile or any requirements file — needs a rebuild.
-        if echo "$changed_files" | grep -qE "^ai_attack_surface_scan/(Dockerfile|.*requirements)"; then
-            rebuild_tools+=(ai-attack-surface)
-        fi
+    # Tool-profile images build ONLY from their own source dirs — a docker-compose.yml
+    # change never alters their content. So rebuild a tool image ONLY when its source
+    # actually changed, even under rebuild_all. This avoids spuriously rebuilding heavy
+    # / fragile tool images (e.g. ai-attack-surface, whose pyrit deps need a Rust
+    # toolchain on arm64) on an unrelated compose change.
+    if echo "$changed_files" | grep -q "^recon/"; then
+        rebuild_tools+=(recon)
+    fi
+    if echo "$changed_files" | grep -q "^gvm_scan/"; then
+        rebuild_tools+=(vuln-scanner)
+    fi
+    if echo "$changed_files" | grep -q "^github_secret_hunt/"; then
+        rebuild_tools+=(github-secret-hunter)
+    fi
+    if echo "$changed_files" | grep -q "^trufflehog_scan/"; then
+        rebuild_tools+=(trufflehog-scanner)
+    fi
+    if echo "$changed_files" | grep -q "^baddns_scan/"; then
+        rebuild_tools+=(baddns-scanner)
+    fi
+    # ai-attack-surface: heavy build-only image (Node + promptfoo + per-tool venvs).
+    # The adapter .py files are volume-mounted into the scan container at spawn
+    # (hot-reload, no rebuild); ONLY the baked-in toolchain — the Dockerfile or any
+    # requirements file — needs a rebuild.
+    if echo "$changed_files" | grep -qE "^ai_attack_surface_scan/(Dockerfile|.*requirements)"; then
+        rebuild_tools+=(ai-attack-surface)
     fi
 
     # Export version for build arg
     export_version
 
-    # Rebuild tool-profile images
+    # Rebuild tool-profile images. A tool image is build-only (not a running core
+    # service), so a failure here must NOT abort the rest of the update (core
+    # services, broker, auth key). Warn and continue; the existing tool image keeps
+    # working until its build is fixed.
     if [[ ${#rebuild_tools[@]} -gt 0 ]]; then
         info "Rebuilding tool images: ${rebuild_tools[*]}"
-        docker compose --profile tools build "${rebuild_tools[@]}"
+        if ! docker compose --profile tools build "${rebuild_tools[@]}"; then
+            warn "One or more tool images failed to build (${rebuild_tools[*]}); continuing with the core update. Re-run the build later: docker compose --profile tools build ${rebuild_tools[*]}"
+        fi
     fi
 
     # Rebuild core service images
