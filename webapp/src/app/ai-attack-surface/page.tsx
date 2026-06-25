@@ -41,7 +41,7 @@ export default function AiAttackSurfacePage() {
   )
   const [trials, setTrials] = useState(1)
   const [asrThreshold, setAsrThreshold] = useState(0.3)
-  const [judgeModel, setJudgeModel] = useState('qwen2.5:7b')
+  const [judgeModel, setJudgeModel] = useState('qwen2.5:0.5b')
   const [maxTurns, setMaxTurns] = useState(4)
   const [seed, setSeed] = useState(0)
   // Concurrent requests per tool (garak --parallel_attempts / promptfoo eval
@@ -114,6 +114,10 @@ export default function AiAttackSurfacePage() {
     const parsed = splitUrl(customUrl)
     if (!parsed) {
       setCustomErr('Enter a full URL, e.g. https://api.example.com/v1/chat/completions')
+      return
+    }
+    if (!customModel.trim()) {
+      setCustomErr('Enter the target model id (e.g. qwen2.5:0.5b) — sent as the "model" field in each request')
       return
     }
     setCustomErr(null)
@@ -318,7 +322,7 @@ export default function AiAttackSurfacePage() {
                 <option value="llm-chat">llm-chat</option>
                 <option value="llm-completion">llm-completion</option>
               </select>
-              <input type="text" placeholder="model (optional)" value={customModel}
+              <input type="text" placeholder="model (required, e.g. qwen2.5:0.5b)" value={customModel}
                      onChange={(e) => setCustomModel(e.target.value)} className={styles.customModel} />
               <button type="button" className={styles.addBtn} onClick={addCustomTarget}>
                 <Plus size={14} /> Add

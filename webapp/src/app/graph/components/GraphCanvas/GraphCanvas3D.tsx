@@ -2,6 +2,8 @@
 
 import { useRef, useEffect, useCallback, useMemo } from 'react'
 import dynamic from 'next/dynamic'
+import * as THREE from 'three'
+import SpriteText from 'three-spritetext'
 import { GraphData, GraphNode, GraphLink } from '../../types'
 import { getNodeColor, getNodeSize, getGlowLevel } from '../../utils'
 import { getLinkColor, getLinkWidth3D, getParticleCount, getParticleWidth, getParticleColor, getParticleSpeed } from '../../utils/linkHelpers'
@@ -67,9 +69,6 @@ function buildFullDetail(
   enableLabels: boolean,
   labelColor: string,
 ): any {
-  const THREE = require('three')
-  const SpriteText = require('three-spritetext').default
-
   const group = new THREE.Group()
   const sphereSize = BASE_SIZES.node3D * getNodeSize(graphNode)
   const nodeColor = getNodeColor(graphNode)
