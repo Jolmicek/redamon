@@ -110,6 +110,7 @@ def run(target, bounds, output_dir: str, run_id: str,
     cfg_path.write_text(json.dumps(cfg, indent=2))
 
     rc, tail = _invoke(cfg_path, gen_path, results_path, api_key,
+                       strategies=sel_strategies,
                        parallel_attempts=max(1, int(getattr(bounds, "parallelism", 2) or 2)),
                        timeout=int(getattr(bounds, "timeout", 0) or DEFAULT_TIMEOUT))
     if not os.path.exists(results_path):
@@ -152,9 +153,14 @@ def run(target, bounds, output_dir: str, run_id: str,
     return findings
 
 
-def _invoke(cfg_path, gen_path, results_path, api_key, parallel_attempts=2,
-            timeout=DEFAULT_TIMEOUT):
+def _invoke(cfg_path, gen_path, results_path, api_key, strategies=None,
+            parallel_attempts=2, timeout=DEFAULT_TIMEOUT):
     """Run the promptfoo 2-step. Returns (rc, log tail). Failure-soft.
+
+    Between generate and eval we expand the generated tests with our LOCAL
+    encoding strategies (base64/rot13/morse/leetspeak/piglatin) — promptfoo gates
+    those behind its remote service, which we disable for zero egress, so without
+    this step only `basic` would ever run (see local_strategies.py).
 
     `parallel_attempts` caps how many test cases eval runs concurrently against
     the target (promptfoo -j) — keep it low for a slow/CPU target. `timeout` is
@@ -173,5 +179,8 @@ def _invoke(cfg_path, gen_path, results_path, api_key, parallel_attempts=2,
     rc1, tail1 = run_streamed(gen, env=env, timeout=timeout, tag="promptfoo:gen")
     if not os.path.exists(gen_path):
         return rc1, tail1
+    if strategies:
+        from .local_strategies import expand_redteam_file
+        expand_redteam_file(str(gen_path), list(strategies))
     logger.info(f"Running promptfoo eval: {' '.join(ev)}")
     return run_streamed(ev, env=env, timeout=timeout, tag="promptfoo:eval")

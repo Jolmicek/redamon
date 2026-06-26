@@ -59,11 +59,13 @@ CHIP_SELECTION: dict[str, dict] = {
 # a degraded selection (anything else may emit empty / conversation-shaped payloads).
 OFFLINE_PLUGINS = {"beavertails", "harmbench", "pliny"}
 
-# promptfoo STRATEGIES that are pure static text transforms — deterministic,
-# local, ZERO egress (they wrap each dataset payload in an encoding). Verified
-# against the promptfoo dist. `basic` = no transform. The adaptive strategies
-# (jailbreak, crescendo, prompt-injection, citation, math-prompt, multilingual)
-# require promptfoo's remote inference service, so they are NOT offered here.
+# Encoding STRATEGIES we support. `basic` = no transform. The encodings are pure
+# deterministic text transforms, but promptfoo 0.121.17 gates them behind its
+# remote generation service: with PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION=true
+# (our zero-egress default) it SKIPS them at `redteam generate`. So we apply them
+# ourselves, offline, after generate (see local_strategies.py). The adaptive
+# strategies (jailbreak, crescendo, prompt-injection, citation, math-prompt,
+# multilingual) need genuine remote inference and are NOT offered here.
 LOCAL_STRATEGIES = {"basic", "base64", "rot13", "leetspeak", "morse", "piglatin"}
 
 # Conservative default run: toxicity + jailbreak, both verified single-turn.

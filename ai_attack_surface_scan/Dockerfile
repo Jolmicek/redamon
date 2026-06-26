@@ -66,6 +66,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && npm install -g "promptfoo@${PROMPTFOO_VERSION}" \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
+# Base-interpreter extra: PyYAML lets the promptfoo adapter parse promptfoo's
+# generated redteam test file (always YAML) so it can apply the local encoding
+# strategies offline (adapters/promptfoo/local_strategies.py). Kept as its own
+# late layer so it reuses the heavy venv/npm cache above instead of busting it.
+RUN pip install --no-cache-dir "PyYAML>=6.0"
+
 # Copy the scanner (spine + adapters). The runner scripts are invoked by their
 # tool's venv; the spine runs in the base interpreter.
 COPY ai_attack_surface_scan/ ./ai_attack_surface_scan/

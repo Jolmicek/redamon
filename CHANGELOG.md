@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.1.1] - 2026-06-26
+
+### Fixed
+
+- **AI Gauntlet (promptfoo): encoding strategies now actually run** ([local_strategies.py](ai_attack_surface_scan/adapters/promptfoo/local_strategies.py), [adapter.py](ai_attack_surface_scan/adapters/promptfoo/adapter.py), [plugins.py](ai_attack_surface_scan/adapters/promptfoo/plugins.py), [Dockerfile](ai_attack_surface_scan/Dockerfile)). Base64 / ROT13 / Leetspeak / Morse / Pig Latin were silently skipped: promptfoo 0.121.17 gates them behind its remote service, which the scan disables for zero egress, so only `basic` ran. The adapter now applies these deterministic transforms itself, offline, after `generate` (one tagged variant per strategy, prompt re-encoded with a decode instruction). Zero egress preserved. Verified by 70 tests plus a live run where base64/leetspeak/morse scored jailbreak hits that plaintext missed.
+
+- **AI Gauntlet UI: custom targets require a model id; promptfoo judge default fixed** ([page.tsx](webapp/src/app/ai-attack-surface/page.tsx)). An empty custom-target model degraded to `"default"`, 404'ing every attack (`model 'default' not found`); the field is now required at add-time. The promptfoo Judge default changed from the rarely-pulled `qwen2.5:7b` to `qwen2.5:0.5b`.
+
+---
+
 ## [5.1.0] - 2026-06-24
 
 ### Security
