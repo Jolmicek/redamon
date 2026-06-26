@@ -239,6 +239,9 @@ export const reconPresetSchema = z.object({
   jsReconValidateKeys: bool,
   jsReconValidationTimeout: int,
   jsReconExtractEndpoints: bool,
+  jsReconValidateEndpoints: bool,
+  jsReconEndpointAcceptStatus: intArr,
+  jsReconEndpointCustomHeaders: strArr,
   jsReconRegexPatterns: bool,
   jsReconSourceMaps: bool,
   jsReconDependencyCheck: bool,
@@ -719,6 +722,9 @@ export const RECON_PARAMETER_CATALOG = `
 - jsReconValidateKeys: boolean - Validate discovered API keys
 - jsReconValidationTimeout: integer
 - jsReconExtractEndpoints: boolean
+- jsReconValidateEndpoints: boolean - Verify extracted endpoints before graph ingestion
+- jsReconEndpointAcceptStatus: integer[] - HTTP status codes treated as live during endpoint verification
+- jsReconEndpointCustomHeaders: string[] - Header lines used when verifying extracted endpoints
 - jsReconRegexPatterns: boolean
 - jsReconSourceMaps: boolean - Analyze source maps
 - jsReconDependencyCheck: boolean
