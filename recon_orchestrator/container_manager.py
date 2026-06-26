@@ -31,12 +31,15 @@ ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*m|\033\[[0-9;]*m')
 # Maximum number of concurrent partial recon runs per project
 MAX_PARALLEL_PARTIAL_RECONS = 12
 
-# V4: recon/partial-recon containers mount this BROKER socket as their
-# /var/run/docker.sock instead of the raw host socket. The docker-broker service
-# serves it here (on the shared /tmp/redamon dir) and filters container-create
-# requests so a compromised worker cannot escape to the host. Overridable for
-# tests / alternate layouts.
-BROKER_SOCKET_HOST = os.environ.get("RECON_DOCKER_BROKER_SOCKET", "/tmp/redamon/.broker/docker.sock")
+# V4: recon/partial-recon containers reach the BROKER socket through this named
+# volume instead of the raw host socket. The docker-broker service serves the
+# filtered socket on the volume and filters container-create requests so a
+# compromised worker cannot escape to the host. A named volume (not a host
+# bind-mount) is used because a live unix socket cannot be shared across
+# containers over the host bind bridge on Docker Desktop for Mac; the volume
+# lives inside the Linux VM and works on both macOS and native Linux. Overridable
+# for tests / alternate layouts.
+BROKER_SOCKET_VOLUME = os.environ.get("RECON_DOCKER_BROKER_VOLUME", "redamon_broker_socket")
 
 # Maximum number of concurrent AI Attack Surface jobs per project. The four core
 # tools may run together (they share one ref-counted judge), so the cap is a
@@ -273,13 +276,17 @@ class ContainerManager:
                     "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
                     # Agent API for AI hooks (FFuf AI extensions, etc.)
                     "AGENT_API_URL": os.environ.get("AGENT_API_URL", "http://localhost:8090"),
+                    # The recon CLI (docker run/pull/info) honors DOCKER_HOST, so
+                    # all sibling-tool spawns flow through the broker socket served
+                    # on the named volume below.
+                    "DOCKER_HOST": "unix:///var/run/broker/docker.sock",
                 },
                 volumes={
-                    # V4: mount the BROKER's filtered socket as /var/run/docker.sock,
+                    # V4: mount the BROKER's filtered socket via a named volume,
                     # NOT the raw host socket. The recon code still does `docker run`
                     # unchanged, but a compromised worker cannot mount / or run a
-                    # privileged/arbitrary container — the broker rejects those.
-                    BROKER_SOCKET_HOST: {"bind": "/var/run/docker.sock", "mode": "rw"},
+                    # privileged/arbitrary container; the broker rejects those.
+                    BROKER_SOCKET_VOLUME: {"bind": "/var/run/broker", "mode": "rw"},
                     # Mount source code for development (no rebuild needed)
                     # Note: rw needed because output/data are subdirectories
                     f"{recon_path}": {"bind": "/app/recon", "mode": "rw"},
@@ -807,13 +814,17 @@ class ContainerManager:
                     "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
                     # Agent API for AI hooks (FFuf AI extensions, etc.)
                     "AGENT_API_URL": os.environ.get("AGENT_API_URL", "http://localhost:8090"),
+                    # The recon CLI (docker run/pull/info) honors DOCKER_HOST, so
+                    # all sibling-tool spawns flow through the broker socket served
+                    # on the named volume below.
+                    "DOCKER_HOST": "unix:///var/run/broker/docker.sock",
                 },
                 volumes={
-                    # V4: mount the BROKER's filtered socket as /var/run/docker.sock,
+                    # V4: mount the BROKER's filtered socket via a named volume,
                     # NOT the raw host socket. The recon code still does `docker run`
                     # unchanged, but a compromised worker cannot mount / or run a
-                    # privileged/arbitrary container — the broker rejects those.
-                    BROKER_SOCKET_HOST: {"bind": "/var/run/docker.sock", "mode": "rw"},
+                    # privileged/arbitrary container; the broker rejects those.
+                    BROKER_SOCKET_VOLUME: {"bind": "/var/run/broker", "mode": "rw"},
                     f"{recon_path}": {"bind": "/app/recon", "mode": "rw"},
                     f"{Path(recon_path).parent}/graph_db": {"bind": "/app/graph_db", "mode": "ro"},
                     "/tmp/redamon": {"bind": "/tmp/redamon", "mode": "rw"},

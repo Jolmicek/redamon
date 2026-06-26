@@ -36,7 +36,11 @@ printf '%s\n' "
 # =============================================================================
 echo -e "${YELLOW}[*] Checking Docker socket access...${NC}"
 
-if [ -S /var/run/docker.sock ]; then
+# If DOCKER_HOST is set to a unix socket, check that path instead
+SOCKET_PATH=${DOCKER_HOST#unix://}
+SOCKET_PATH=${SOCKET_PATH:-/var/run/docker.sock}
+
+if [ -S "$SOCKET_PATH" ]; then
     if docker info > /dev/null 2>&1; then
         echo -e "${GREEN}[+] Docker socket accessible${NC}"
     else

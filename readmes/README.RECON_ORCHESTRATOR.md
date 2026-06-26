@@ -319,8 +319,11 @@ When starting a recon, the orchestrator:
    - `network_mode: host` for scanning capabilities
    - `NET_RAW` capability only (for `masscan`/`nmap` SYN scans); the container is
      **not** privileged, so it has no host-device or mount access
-   - Filtering broker socket (mounted at `/var/run/docker.sock`) for nested
-     (sibling) container execution, restricted to the known tool images
+   - Filtering broker socket for nested (sibling) container execution, restricted
+     to the known tool images. It is served on the `redamon_broker_socket` named
+     volume (mounted at `/var/run/broker`) and selected via the `DOCKER_HOST`
+     env var; a named volume is used so the unix socket is shareable across
+     containers on both macOS (Docker Desktop) and native Linux
    - Environment variables: `PROJECT_ID`, `USER_ID`, `WEBAPP_API_URL`
 
 ### Log Streaming Implementation

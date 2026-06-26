@@ -290,7 +290,9 @@ services:
   # /var/run/docker.sock, so a compromised recon container cannot escape to the
   # host (no -v /:/host, no --privileged, no non-allowlisted image). The broker
   # holds the REAL socket (it is trusted, like the orchestrator) and serves its
-  # filtered socket on the shared /tmp/redamon dir. See docker_broker/.
+  # filtered socket on the redamon_broker_socket named volume (which lives inside
+  # the Linux VM, so the unix socket is shareable on macOS + Linux). See
+  # docker_broker/.
   docker-broker:
     build: ./docker_broker
     image: redamon-docker-broker:latest
@@ -298,10 +300,11 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock          # real socket (forward target)
-      - /tmp/redamon:/tmp/redamon                           # serve filtered socket here
+      - redamon_broker_socket:/var/run/broker              # named volume; lives in the Linux VM so the unix socket is shareable on macOS + Linux
+      - /tmp/redamon:/tmp/redamon                           # shared scratch dir (recon output, temp files)
     environment:
       DOCKER_BROKER_UPSTREAM: /var/run/docker.sock
-      DOCKER_BROKER_LISTEN: /tmp/redamon/.broker/docker.sock
+      DOCKER_BROKER_LISTEN: /var/run/broker/docker.sock
       # Tool images the recon pipeline may run (V3 set is the broker default;
       # operator extras flow through to keep parity with RECON_EXTRA_ALLOWED_IMAGES).
       DOCKER_BROKER_ALLOWED_IMAGES: ${RECON_EXTRA_ALLOWED_IMAGES:-}
@@ -311,7 +314,7 @@ services:
       DOCKER_BROKER_ALLOWED_BIND_PREFIXES: /tmp/redamon,${PWD:-/home/samuele/Progetti didattici/redamon}
       DOCKER_BROKER_ALLOWED_VOLUMES: nuclei-templates
     healthcheck:
-      test: ["CMD-SHELL", "test -S /tmp/redamon/.broker/docker.sock"]
+      test: ["CMD-SHELL", "test -S /var/run/broker/docker.sock"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -789,3 +792,5 @@ volumes:
   ospd_socket:
     name: redamon_ospd_socket
   cypherfix-repos:  # Temp storage for cloned GitHub repos (CodeFix agent)
+  redamon_broker_socket:  # Holds the docker-broker filtered socket; in-VM so it is shareable on macOS + Linux
+    name: redamon_broker_socket
