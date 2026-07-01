@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.2.1] - 2026-07-01
+
+### Changed
+
+- **Adaptive memory-safe Docker builds** ([redamon.sh](redamon.sh)). All image builds now route through a `compose_build` wrapper that builds the RAM-heavy `webapp` (Next.js) image in isolation first, then caps parallelism based on the memory/CPU reported by `docker info` (VM-aware on macOS/Windows). Fixes the OOM kill (`exit 137`) that could abort `./redamon.sh update` when webapp built in parallel with the `agent` image. Override with `REDAMON_BUILD_PARALLEL=N` (`0` = unbounded). Covered by [tests/redamon_build_test.sh](tests/redamon_build_test.sh).
+
+---
+
 ## [5.2.0] - 2026-06-30
 
 ### Added

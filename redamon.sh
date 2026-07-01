@@ -60,6 +60,198 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
+# ---------------------------------------------------------------------------
+# Adaptive build parallelism (memory-safe Docker builds)
+# ---------------------------------------------------------------------------
+# The Next.js `webapp` image build peaks at several GB of RAM. Building it in
+# parallel with the heavy `agent` image (pip install + large layer export) has
+# OOM-killed the webapp build on low-memory hosts ("Killed" / exit code 137).
+# Two-layer mitigation, applied to EVERY `docker compose build` in this script
+# via compose_build():
+#   Layer 1: always build `webapp` on its own first. Once built its layers are
+#            cached, so it never compiles concurrently with another image.
+#   Layer 2: cap COMPOSE_PARALLEL_LIMIT for the remaining images based on the
+#            memory/CPU actually available to the Docker BUILD ENGINE.
+#
+# Cross-platform: on macOS/Windows the Docker Desktop builder runs inside a Linux
+# VM whose memory is capped independently of host RAM, so reading host RAM would
+# be misleading. `docker info` reports the engine's real limits and is correct on
+# Linux, macOS and Windows alike; host probing (/proc, sysctl) is only a fallback.
+#
+# Override: REDAMON_BUILD_PARALLEL=N forces the limit (N>=1), =0 leaves it
+# unbounded. webapp isolation always applies regardless of the override.
+
+BUILD_MEM_MB=0
+BUILD_NCPU=1
+BUILD_RES_SOURCE="unknown"
+
+# Query a single `docker info` field, guarding against a wedged daemon. `timeout`
+# is not present on stock macOS, so use it only when available.
+_docker_info_field() {
+    local field="$1" out=""
+    if command -v timeout >/dev/null 2>&1; then
+        out="$(timeout 8 docker info --format "{{.$field}}" 2>/dev/null)" || out=""
+    else
+        out="$(docker info --format "{{.$field}}" 2>/dev/null)" || out=""
+    fi
+    printf '%s' "$out"
+}
+
+# Populate BUILD_MEM_MB / BUILD_NCPU / BUILD_RES_SOURCE.
+detect_build_resources() {
+    local mem_bytes ncpu
+
+    # Primary source: the Docker engine's own view (VM-aware on Mac/Windows).
+    mem_bytes="$(_docker_info_field MemTotal)"
+    ncpu="$(_docker_info_field NCPU)"
+    mem_bytes="${mem_bytes//[^0-9]/}"
+    ncpu="${ncpu//[^0-9]/}"
+
+    if [[ -n "$mem_bytes" && "$mem_bytes" -gt 0 ]]; then
+        BUILD_MEM_MB=$(( mem_bytes / 1048576 ))
+        BUILD_RES_SOURCE="docker info"
+    else
+        # Fallback: probe the host OS directly.
+        case "$(uname -s 2>/dev/null || echo unknown)" in
+            Darwin)
+                mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+                mem_bytes="${mem_bytes//[^0-9]/}"
+                if [[ -n "$mem_bytes" && "$mem_bytes" -gt 0 ]]; then
+                    BUILD_MEM_MB=$(( mem_bytes / 1048576 ))
+                fi
+                BUILD_RES_SOURCE="sysctl (host)"
+                ;;
+            *)  # Linux, WSL2, Git Bash/MSYS all expose /proc/meminfo
+                if [[ -r /proc/meminfo ]]; then
+                    local mem_kb
+                    mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+                    mem_kb="${mem_kb//[^0-9]/}"
+                    if [[ -n "$mem_kb" && "$mem_kb" -gt 0 ]]; then
+                        BUILD_MEM_MB=$(( mem_kb / 1024 ))
+                    fi
+                    BUILD_RES_SOURCE="/proc/meminfo (host)"
+                fi
+                ;;
+        esac
+    fi
+
+    # CPU count: docker info value, else nproc, else sysctl, else 1.
+    if [[ -z "$ncpu" || "$ncpu" -lt 1 ]]; then
+        if command -v nproc >/dev/null 2>&1; then
+            ncpu="$(nproc 2>/dev/null || echo 1)"
+        elif [[ "$(uname -s 2>/dev/null || echo unknown)" == "Darwin" ]]; then
+            ncpu="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 1)"
+        else
+            ncpu=1
+        fi
+        ncpu="${ncpu//[^0-9]/}"
+    fi
+    if [[ -z "$ncpu" || "$ncpu" -lt 1 ]]; then ncpu=1; fi
+    BUILD_NCPU="$ncpu"
+}
+
+# Echo the chosen COMPOSE_PARALLEL_LIMIT. "0" means "leave unbounded".
+# Assumes detect_build_resources() has already run.
+pick_parallelism() {
+    # Explicit override wins and skips heuristics entirely.
+    if [[ -n "${REDAMON_BUILD_PARALLEL:-}" ]]; then
+        local ov="${REDAMON_BUILD_PARALLEL//[^0-9]/}"
+        if [[ -z "$ov" ]]; then ov=1; fi
+        printf '%s' "$ov"
+        return
+    fi
+
+    # Could not detect memory -> be conservative (serial).
+    if [[ "$BUILD_MEM_MB" -le 0 ]]; then
+        printf '1'
+        return
+    fi
+
+    # Reserve headroom for the OS plus RedAmon containers that stay running
+    # during `update` (neo4j/postgres/agent), and budget ~2GB per concurrent
+    # heavy build.
+    local reserve=2560 per_build=2048 usable mem_bound parallel
+    usable=$(( BUILD_MEM_MB - reserve ))
+    if [[ "$usable" -lt "$per_build" ]]; then
+        mem_bound=1
+    else
+        mem_bound=$(( usable / per_build ))
+    fi
+
+    parallel="$mem_bound"
+    if [[ "$BUILD_NCPU" -lt "$parallel" ]]; then parallel="$BUILD_NCPU"; fi
+    if [[ "$parallel" -lt 1 ]]; then parallel=1; fi
+    if [[ "$parallel" -gt 6 ]]; then parallel=6; fi
+    printf '%s' "$parallel"
+}
+
+# Warn when the engine has so little memory that even the isolated webapp build
+# may OOM -- no scheduling can fix that, the user must grant more memory.
+maybe_warn_low_memory() {
+    if [[ "$BUILD_MEM_MB" -gt 0 && "$BUILD_MEM_MB" -lt 5120 ]]; then
+        warn "Low build memory: ~$(( BUILD_MEM_MB / 1024 ))GB available to Docker (source: ${BUILD_RES_SOURCE}); the webapp build may still run out of memory."
+        case "$(uname -s 2>/dev/null || echo unknown)" in
+            Darwin|MINGW*|MSYS*|CYGWIN*)
+                warn "  Increase it in Docker Desktop > Settings > Resources > Memory (6GB+ recommended), then re-run."
+                ;;
+            *)
+                if grep -qi microsoft /proc/version 2>/dev/null; then
+                    warn "  On WSL2, raise memory via %UserProfile%\\.wslconfig ([wsl2] memory=6GB), run 'wsl --shutdown', then re-run."
+                else
+                    warn "  Consider adding swap: sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
+                fi
+                ;;
+        esac
+    fi
+}
+
+# Memory-safe replacement for `docker compose ... build ...`. Pass exactly the
+# args that would follow `docker compose`, e.g.:
+#   compose_build --profile tools build
+#   compose_build --profile tools build recon vuln-scanner
+#   compose_build build recon-orchestrator kali-sandbox agent webapp docker-broker
+compose_build() {
+    detect_build_resources
+    local parallel; parallel="$(pick_parallelism)"
+
+    # Find the service names (positional args after the `build` subcommand).
+    local seen_build=false svc has_webapp=false svc_count=0
+    for svc in "$@"; do
+        if [[ "$seen_build" == false ]]; then
+            if [[ "$svc" == "build" ]]; then seen_build=true; fi
+            continue
+        fi
+        case "$svc" in
+            -*) continue ;;   # skip build flags (--no-cache, --pull, ...)
+        esac
+        svc_count=$(( svc_count + 1 ))
+        if [[ "$svc" == "webapp" ]]; then has_webapp=true; fi
+    done
+
+    # A build with no explicit service list builds everything -> webapp included.
+    local isolate_webapp=false
+    if [[ "$has_webapp" == true || "$svc_count" -eq 0 ]]; then
+        isolate_webapp=true
+    fi
+
+    info "Docker build resources: ~$(( BUILD_MEM_MB / 1024 ))GB RAM / ${BUILD_NCPU} CPU (${BUILD_RES_SOURCE}); parallelism=${parallel}"
+    maybe_warn_low_memory
+
+    # Layer 1: build the RAM-heavy webapp on its own first.
+    if [[ "$isolate_webapp" == true ]]; then
+        info "Building webapp in isolation first (prevents out-of-memory during parallel build)..."
+        docker compose build webapp
+    fi
+
+    # Layer 2: build the (remaining) images with a capped parallel limit. If
+    # webapp was in the set it is now cached, so re-passing it is a no-op.
+    if [[ -n "$parallel" && "$parallel" -ge 1 ]]; then
+        COMPOSE_PARALLEL_LIMIT="$parallel" docker compose "$@"
+    else
+        docker compose "$@"   # REDAMON_BUILD_PARALLEL=0 -> unbounded
+    fi
+}
+
 get_version() {
     if [[ -f "$VERSION_FILE" ]]; then
         cat "$VERSION_FILE" | tr -d '[:space:]'
@@ -628,7 +820,7 @@ cmd_install() {
 
     # Build all images (tools + core services)
     info "Building all images (this may take a while on first run)..."
-    docker compose --profile tools build
+    compose_build --profile tools build
 
     # Pull GVM images with retry (large images, unreliable registry)
     if [[ "$gvm_mode" == "true" ]]; then
@@ -848,7 +1040,7 @@ cmd_update() {
     # working until its build is fixed.
     if [[ ${#rebuild_tools[@]} -gt 0 ]]; then
         info "Rebuilding tool images: ${rebuild_tools[*]}"
-        if ! docker compose --profile tools build "${rebuild_tools[@]}"; then
+        if ! compose_build --profile tools build "${rebuild_tools[@]}"; then
             warn "One or more tool images failed to build (${rebuild_tools[*]}); continuing with the core update. Re-run the build later: docker compose --profile tools build ${rebuild_tools[*]}"
         fi
     fi
@@ -856,7 +1048,7 @@ cmd_update() {
     # Rebuild core service images
     if [[ ${#rebuild_core[@]} -gt 0 ]]; then
         info "Rebuilding service images: ${rebuild_core[*]}"
-        docker compose build "${rebuild_core[@]}"
+        compose_build build "${rebuild_core[@]}"
     fi
 
     # Clean up dangling images left by rebuilds
@@ -918,7 +1110,7 @@ ensure_tool_images() {
     if [[ "$missing" == "true" ]]; then
         info "Tool images not found, building them (first time only)..."
         export_version
-        docker compose --profile tools build
+        compose_build --profile tools build
         success "Tool images built."
     fi
 }
@@ -1389,6 +1581,11 @@ cmd_help() {
 # Main
 # ---------------------------------------------------------------------------
 
+# Dispatch only when executed directly. When the script is sourced (e.g. by the
+# test suite in tests/redamon_build_test.sh) this guard prevents the cd and the
+# command dispatch from running, so the helper functions can be loaded and unit-
+# tested in isolation.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 cd "$SCRIPT_DIR"
 
 case "${1:-help}" in
@@ -1428,3 +1625,4 @@ case "${1:-help}" in
         exit 1
         ;;
 esac
+fi

@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Test suite for the adaptive memory-safe Docker build logic in redamon.sh
+# (compose_build / detect_build_resources / pick_parallelism / maybe_warn_low_memory).
+#
+# Suites: unit, integration (stubbed docker), smoke (real docker/compose),
+#         regression. Run:  bash tests/redamon_build_test.sh
+# Smoke tests that need a running Docker daemon are skipped (not failed) when
+# Docker is unavailable, so the suite is CI-friendly.
+# =============================================================================
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source the script (BASH_SOURCE guard prevents command dispatch). This defines
+# compose_build, detect_build_resources, pick_parallelism, maybe_warn_low_memory,
+# info/warn/error, etc. It also turns on `set -euo pipefail`; we relax -e in the
+# harness so a failing assertion does not abort the whole run.
+# shellcheck disable=SC1090
+source "$REPO_ROOT/redamon.sh"
+set +e
+
+PASS=0; FAIL=0
+pass() { PASS=$((PASS+1)); printf '  \033[0;32mPASS\033[0m %s\n' "$1"; }
+fail() { FAIL=$((FAIL+1)); printf '  \033[0;31mFAIL\033[0m %s\n' "$1"; }
+# assert_eq <label> <got> <expected>
+assert_eq() { if [[ "$2" == "$3" ]]; then pass "$1 ($2)"; else fail "$1 (got='$2' expected='$3')"; fi; }
+# assert_contains <label> <haystack> <needle>
+assert_contains() { if [[ "$2" == *"$3"* ]]; then pass "$1"; else fail "$1 (missing '$3' in: $2)"; fi; }
+# assert_not_contains <label> <haystack> <needle>
+assert_not_contains() { if [[ "$2" != *"$3"* ]]; then pass "$1"; else fail "$1 (unexpected '$3' in: $2)"; fi; }
+section() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+
+# Silence info/warn during tests unless a test opts in (they write to stdout and
+# would pollute captured output). Re-defined AFTER source, overriding redamon's.
+info() { :; }
+warn() { :; }
+
+# --- docker stub: records every invocation + the parallel-limit env in effect ---
+CALLS=""
+DOCKER_RC=0
+docker() { printf 'LIMIT=%s|%s\n' "${COMPOSE_PARALLEL_LIMIT:-unset}" "$*" >> "$CALLS"; return "$DOCKER_RC"; }
+reset_calls() { CALLS="$(mktemp)"; DOCKER_RC=0; unset COMPOSE_PARALLEL_LIMIT; }
+
+# Fix detected resources deterministically for integration tests.
+stub_resources() { detect_build_resources() { BUILD_MEM_MB="${1:-8192}"; BUILD_NCPU="${2:-8}"; BUILD_RES_SOURCE="stub"; }; }
+
+# =============================================================================
+section "UNIT: pick_parallelism tiers"
+# formula: usable=mem-2560; bound=usable/2048 (1 if usable<2048); min(bound,cpu) clamp[1,6]
+unset REDAMON_BUILD_PARALLEL
+u_pp() { BUILD_MEM_MB="$1"; BUILD_NCPU="$2"; pick_parallelism; }
+assert_eq "mem=0 undetected -> serial"      "$(u_pp 0 8)"      "1"
+assert_eq "mem=2GB -> 1"                     "$(u_pp 2048 8)"   "1"
+assert_eq "mem=4GB -> 1"                     "$(u_pp 4096 8)"   "1"
+assert_eq "mem=8GB/8cpu -> 2"                "$(u_pp 8192 8)"   "2"
+assert_eq "mem=8GB/1cpu -> cpu-bound 1"      "$(u_pp 8192 1)"   "1"
+assert_eq "mem=12GB/8cpu -> 4"               "$(u_pp 12288 8)"  "4"
+assert_eq "mem=16GB/8cpu -> 6 (clamp)"       "$(u_pp 16384 8)"  "6"
+assert_eq "mem=32GB/16cpu -> 6 (clamp)"      "$(u_pp 32768 16)" "6"
+assert_eq "mem=32GB/3cpu -> cpu-bound 3"     "$(u_pp 32768 3)"  "3"
+
+section "UNIT: pick_parallelism override"
+BUILD_MEM_MB=8192; BUILD_NCPU=8
+# Set the env var IN the same subshell that runs pick_parallelism (a `VAR=x cmd`
+# prefix would not reach the command substitution).
+_ov() { ( export REDAMON_BUILD_PARALLEL="$1"; pick_parallelism ); }
+assert_eq "override 0 -> unbounded"    "$(_ov 0)"  "0"
+assert_eq "override 1"                 "$(_ov 1)"  "1"
+assert_eq "override 5 beats detection" "$(_ov 5)"  "5"
+assert_eq "override non-numeric -> 1"  "$(_ov xx)" "1"
+unset REDAMON_BUILD_PARALLEL
+assert_eq "no override -> detection (8GB->2)" "$(pick_parallelism)" "2"
+
+section "UNIT: detect_build_resources sources"
+# Primary: docker info
+_docker_info_field() { case "$1" in MemTotal) echo 16777216000;; NCPU) echo 10;; esac; }
+detect_build_resources
+assert_eq "primary mem (16000MB)"  "$BUILD_MEM_MB"     "16000"
+assert_eq "primary cpu"            "$BUILD_NCPU"       "10"
+assert_eq "primary source"         "$BUILD_RES_SOURCE" "docker info"
+# Fallback Linux: /proc/meminfo (real host)
+_docker_info_field() { echo ""; }
+uname() { echo "Linux"; }
+detect_build_resources
+if [[ "$BUILD_MEM_MB" -gt 0 ]]; then pass "linux fallback mem>0 ($BUILD_MEM_MB)"; else fail "linux fallback mem=0"; fi
+assert_eq "linux fallback source" "$BUILD_RES_SOURCE" "/proc/meminfo (host)"
+if [[ "$BUILD_NCPU" -ge 1 ]]; then pass "linux fallback cpu>=1 ($BUILD_NCPU)"; else fail "cpu<1"; fi
+# Fallback macOS: sysctl
+_docker_info_field() { echo ""; }
+uname() { echo "Darwin"; }
+sysctl() { case "$2" in hw.memsize) echo 34359738368;; hw.logicalcpu) echo 12;; esac; }
+detect_build_resources
+assert_eq "darwin fallback mem (32768MB)" "$BUILD_MEM_MB"     "32768"
+assert_eq "darwin fallback source"        "$BUILD_RES_SOURCE" "sysctl (host)"
+unset -f _docker_info_field uname sysctl
+
+section "UNIT: maybe_warn_low_memory"
+_warn() { warn() { echo "$*"; }; }   # temporarily capture warn
+uname() { echo "Darwin"; }
+BUILD_MEM_MB=3072; BUILD_RES_SOURCE="docker info"
+out="$(warn() { echo "$*"; }; maybe_warn_low_memory 2>&1)"
+assert_contains "mac/win hint -> Docker Desktop" "$out" "Docker Desktop"
+uname() { echo "Linux"; }
+grep() { return 1; }  # not WSL
+out="$(warn() { echo "$*"; }; maybe_warn_low_memory 2>&1)"
+assert_contains "linux hint -> swap" "$out" "swapfile"
+grep() { return 0; }  # WSL
+out="$(warn() { echo "$*"; }; maybe_warn_low_memory 2>&1)"
+assert_contains "wsl hint -> .wslconfig" "$out" "wslconfig"
+unset -f grep uname
+BUILD_MEM_MB=16000
+out="$(warn() { echo "$*"; }; maybe_warn_low_memory 2>&1)"
+assert_eq "adequate mem -> no warning" "$out" ""
+
+# =============================================================================
+section "INTEGRATION: compose_build orchestration (stubbed docker)"
+stub_resources 8192 8   # -> parallelism 2
+
+# I1: install full build
+reset_calls; compose_build --profile tools build
+c1="$(sed -n 1p "$CALLS")"; c2="$(sed -n 2p "$CALLS")"; n="$(wc -l < "$CALLS")"
+assert_eq       "I1 full build: 2 docker calls" "$n" "2"
+assert_contains "I1 webapp isolated first (unset limit)" "$c1" "LIMIT=unset|compose build webapp"
+assert_contains "I1 then full build capped"              "$c2" "LIMIT=2|compose --profile tools build"
+
+# I2: update core INCLUDING webapp (the OOM case) + ordering + passthrough
+reset_calls; compose_build build recon-orchestrator kali-sandbox agent webapp docker-broker
+c1="$(sed -n 1p "$CALLS")"; c2="$(sed -n 2p "$CALLS")"
+assert_contains "I2 webapp built FIRST"      "$c1" "LIMIT=unset|compose build webapp"
+assert_contains "I2 full list built after"   "$c2" "LIMIT=2|compose build recon-orchestrator kali-sandbox agent webapp docker-broker"
+
+# I3: update core WITHOUT webapp -> no isolation, single capped build
+reset_calls; compose_build build agent
+n="$(wc -l < "$CALLS")"; c1="$(sed -n 1p "$CALLS")"
+assert_eq       "I3 agent-only: 1 docker call"  "$n" "1"
+assert_not_contains "I3 no webapp isolation"    "$(cat "$CALLS")" "build webapp"
+assert_contains "I3 capped single build"        "$c1" "LIMIT=2|compose build agent"
+
+# I4: tools-only update -> no webapp isolation
+reset_calls; compose_build --profile tools build recon vuln-scanner
+assert_not_contains "I4 tools-only: no webapp build" "$(cat "$CALLS")" "compose build webapp"
+assert_contains     "I4 tools built capped"          "$(cat "$CALLS")" "LIMIT=2|compose --profile tools build recon vuln-scanner"
+
+# I5: override=0 still isolates webapp, second call unbounded
+reset_calls; REDAMON_BUILD_PARALLEL=0 compose_build build agent webapp
+c1="$(sed -n 1p "$CALLS")"; c2="$(sed -n 2p "$CALLS")"
+assert_contains "I5 override0 still isolates webapp" "$c1" "LIMIT=unset|compose build webapp"
+assert_contains "I5 override0 second call unbounded" "$c2" "LIMIT=unset|compose build agent webapp"
+
+# I6: override=3 -> limit 3
+reset_calls; REDAMON_BUILD_PARALLEL=3 compose_build build agent
+assert_contains "I6 override3 applied" "$(cat "$CALLS")" "LIMIT=3|compose build agent"
+
+# I7: passthrough of extra build flags on a full build
+reset_calls; compose_build --profile tools build --no-cache
+assert_contains "I7 flag passthrough + isolation" "$(cat "$CALLS")" "LIMIT=2|compose --profile tools build --no-cache"
+assert_contains "I7 webapp still isolated"         "$(sed -n 1p "$CALLS")" "compose build webapp"
+
+# I8: failure propagation under set -e (faithful to real script)
+reset_calls; DOCKER_RC=7
+if ( set -e; DOCKER_RC=7; compose_build build agent ); then rc=0; else rc=$?; fi
+assert_eq "I8 non-zero docker propagates" "$rc" "7"
+DOCKER_RC=0
+
+# I9: isolation command shape is exactly `build webapp` (no --profile leakage)
+reset_calls; compose_build --profile tools build
+assert_eq "I9 isolation call exact" "$(sed -n 1p "$CALLS" | cut -d'|' -f2)" "compose build webapp"
+
+# =============================================================================
+section "SMOKE: real script + docker/compose"
+# S1: syntax
+if bash -n "$REPO_ROOT/redamon.sh"; then pass "S1 bash -n clean"; else fail "S1 syntax"; fi
+# S2: help dispatch runs when executed directly
+if bash "$REPO_ROOT/redamon.sh" help >/dev/null 2>&1; then pass "S2 direct 'help' dispatch ok"; else fail "S2 help dispatch"; fi
+# S3/S4 need a docker daemon. Probe with `command docker` so the integration
+# `docker()` stub (which always returns 0) cannot make an absent daemon look up.
+if command -v docker >/dev/null 2>&1 && command docker info >/dev/null 2>&1; then
+    # S3: webapp is a real, buildable compose service (Layer-1 target valid)
+    svcs="$(command docker compose -f "$REPO_ROOT/docker-compose.yml" config --services 2>/dev/null)"
+    assert_contains "S3 webapp is a compose service" "$svcs" "webapp"
+    assert_contains "S3 agent is a compose service"  "$svcs" "agent"
+    # S4: real detection returns sane values via docker info
+    unset -f detect_build_resources 2>/dev/null || true
+    source "$REPO_ROOT/redamon.sh"; set +e   # restore real detect_build_resources
+    info() { :; }; warn() { :; }
+    detect_build_resources
+    if [[ "$BUILD_MEM_MB" -gt 0 ]]; then pass "S4 real mem>0 ($BUILD_MEM_MB MB, $BUILD_RES_SOURCE)"; else fail "S4 real mem=0"; fi
+    if [[ "$BUILD_NCPU" -ge 1 ]]; then pass "S4 real cpu>=1 ($BUILD_NCPU)"; else fail "S4 cpu"; fi
+else
+    printf '  \033[0;33mSKIP\033[0m S3/S4 (docker daemon unavailable)\n'
+fi
+
+# =============================================================================
+section "REGRESSION: call-site wiring"
+rd="$REPO_ROOT/redamon.sh"
+# R1: no raw `docker compose ... build` invocations remain outside compose_build's own body.
+#     compose_build contains exactly one intentional `docker compose build webapp` (Layer 1)
+#     and one `docker compose "$@"` (Layer 2). Everything else must go through compose_build.
+raw="$(grep -nE '^[[:space:]]*docker compose( --profile tools)? build( |$)' "$rd" | grep -v 'docker compose build webapp' || true)"
+assert_eq "R1 no raw parallel builds outside wrapper" "$raw" ""
+# R2: all four call sites use compose_build
+n_calls="$(grep -cE '(^|[^_])compose_build (--profile tools )?build' "$rd")"
+if [[ "$n_calls" -ge 4 ]]; then pass "R2 >=4 compose_build call sites ($n_calls)"; else fail "R2 only $n_calls call sites"; fi
+# R3: tools-failure warn message preserved
+if grep -q "One or more tool images failed to build" "$rd"; then pass "R3 tools-failure warn intact"; else fail "R3 warn removed"; fi
+# R4: source guard present so tests can load functions
+if grep -qF '"${BASH_SOURCE[0]}" == "${0}"' "$rd"; then pass "R4 source guard present"; else fail "R4 source guard missing"; fi
+# R5: core service list still built as a unit (no service silently dropped) -- checked via I2 passthrough above
+pass "R5 service-set passthrough verified in I2"
+
+# =============================================================================
+printf '\n\033[1m==================== RESULTS ====================\033[0m\n'
+printf 'PASS: %d   FAIL: %d\n' "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]] && { printf '\033[0;32mALL GREEN\033[0m\n'; exit 0; } || { printf '\033[0;31mFAILURES\033[0m\n'; exit 1; }
