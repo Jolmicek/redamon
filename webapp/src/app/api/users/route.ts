@@ -56,8 +56,10 @@ export async function GET(request: NextRequest) {
 // POST /api/users - Create a new user (admin only or internal)
 export async function POST(request: NextRequest) {
   try {
-    // Allow internal service calls
-    if (!isInternalRequest(request)) {
+    // S2/E2: creating a user (incl. minting an admin via role) requires an
+    // admin SESSION. The internal-key bypass is removed here — no production
+    // internal caller creates users, and key possession must not mint admins.
+    {
       const session = await getSession()
       if (!session || session.role !== 'admin') {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

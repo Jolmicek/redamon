@@ -1,9 +1,52 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { jwtVerify } from 'jose'
+import { constantTimeEqual } from './lib/constantTimeEqual'
 
 const AUTH_COOKIE_NAME = 'redamon-auth'
 
 const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/logout', '/api/health', '/api/version/check', '/api/global/tunnel-config/sync']
+
+// S2/E2: the internal-key bypass is scoped to exactly the routes that internal
+// services (agent / orchestrator / recon) legitimately reach with X-Internal-Key.
+// A valid key on ANY OTHER route no longer skips JWT once enforcement is on.
+// method 'ANY' = any verb (routes with their own in-route isInternalRequest
+// carve-outs, e.g. chat persistence + cypherfix remediations from the BOLA work).
+const INTERNAL_ALLOWLIST: { method: string; pattern: RegExp }[] = [
+  { method: 'GET', pattern: /^\/api\/users\/[^/]+\/llm-providers$/ },
+  { method: 'GET', pattern: /^\/api\/users\/[^/]+\/settings$/ },
+  { method: 'GET', pattern: /^\/api\/users\/[^/]+\/tradecraft-resources$/ },
+  { method: 'GET', pattern: /^\/api\/projects\/[^/]+$/ },
+  { method: 'ANY', pattern: /^\/api\/internal\/codefix-sandbox\// },
+  { method: 'ANY', pattern: /^\/api\/conversations\/by-session\// },
+  { method: 'ANY', pattern: /^\/api\/remediations(\/|$)/ },
+  { method: 'GET', pattern: /^\/api\/global\/tunnel-config$/ },
+]
+
+// Fail-open rollout: default log-only (never blocks), so an omitted route shows
+// up in logs BEFORE it can break a caller. Flip to enforce with
+// INTERNAL_KEY_ALLOWLIST_ENFORCE=true once the logs confirm only known routes.
+const ENFORCE_ALLOWLIST = process.env.INTERNAL_KEY_ALLOWLIST_ENFORCE === 'true'
+
+export function internalKeyRouteAllowed(method: string, pathname: string): boolean {
+  return INTERNAL_ALLOWLIST.some(
+    (a) => (a.method === 'ANY' || a.method === method) && a.pattern.test(pathname),
+  )
+}
+
+// S3/E6: the scanner token is a strict SUBSET — only the two GET routes recon
+// legitimately reads (its OSINT settings + project config). Excluded from
+// llm-providers, tradecraft, and all user-CRUD. Enforced directly (SCANNER_API_KEY
+// is a brand-new principal with no legacy callers, so there is nothing to break).
+const SCANNER_ALLOWLIST: { method: string; pattern: RegExp }[] = [
+  { method: 'GET', pattern: /^\/api\/users\/[^/]+\/settings$/ },
+  { method: 'GET', pattern: /^\/api\/projects\/[^/]+$/ },
+]
+
+export function scannerKeyRouteAllowed(method: string, pathname: string): boolean {
+  return SCANNER_ALLOWLIST.some(
+    (a) => (a.method === 'ANY' || a.method === method) && a.pattern.test(pathname),
+  )
+}
 
 function getSecret() {
   const secret = process.env.AUTH_SECRET
@@ -41,11 +84,34 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
-  // Internal service-to-service calls (Docker network)
+  // Internal service-to-service calls (Docker network). S2/E2: constant-time
+  // compare + route allowlist so a valid key does not blanket-skip JWT.
   const internalKey = request.headers.get('x-internal-key')
   const expectedKey = process.env.INTERNAL_API_KEY
-  if (internalKey && expectedKey && expectedKey !== 'changeme' && internalKey === expectedKey) {
-    return NextResponse.next()
+  if (internalKey && expectedKey && expectedKey !== 'changeme' && constantTimeEqual(internalKey, expectedKey)) {
+    if (internalKeyRouteAllowed(request.method, pathname)) {
+      return NextResponse.next()
+    }
+    // Valid key but off-allowlist route.
+    if (ENFORCE_ALLOWLIST) {
+      // Fall through to the JWT check below — a service call has no auth cookie,
+      // so it becomes 401 (or a redirect for a page). This is the closure.
+      console.warn(`[internal-key] BLOCKED off-allowlist ${request.method} ${pathname}`)
+    } else {
+      console.warn(`[internal-key] off-allowlist ${request.method} ${pathname} (log-only; set INTERNAL_KEY_ALLOWLIST_ENFORCE=true to block)`)
+      return NextResponse.next()
+    }
+  }
+
+  // S3/E6: the scoped scanner token. Accepted ONLY on its two GET routes;
+  // any other route with the scanner key falls through to JWT (401 for a
+  // service). Enforced directly — no legacy callers hold this new token.
+  const scannerKey = process.env.SCANNER_API_KEY
+  if (internalKey && scannerKey && scannerKey !== 'changeme' && constantTimeEqual(internalKey, scannerKey)) {
+    if (scannerKeyRouteAllowed(request.method, pathname)) {
+      return NextResponse.next()
+    }
+    console.warn(`[scanner-key] BLOCKED out-of-scope ${request.method} ${pathname}`)
   }
 
   // Check JWT cookie

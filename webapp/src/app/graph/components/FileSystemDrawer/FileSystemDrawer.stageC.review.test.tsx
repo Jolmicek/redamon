@@ -22,11 +22,34 @@ vi.mock('@/components/ui/Drawer', () => ({
   ),
 }))
 
+// Mock useAlertModal. The real hook requires <AlertProvider> in the tree
+// (mounted in app/layout.tsx in production). Without this mock the component
+// throws on render.
+const alertSpies = vi.hoisted(() => ({
+  alert: vi.fn(async () => {}),
+  alertError: vi.fn(async () => {}),
+  alertWarning: vi.fn(async () => {}),
+  confirm: vi.fn(async () => true),
+  dangerConfirm: vi.fn(async () => true),
+}))
+vi.mock('@/components/ui', async (orig) => {
+  const real = (await orig()) as Record<string, unknown>
+  return {
+    ...real,
+    useAlertModal: () => alertSpies,
+  }
+})
+
 interface FetchCall { url: string; init?: RequestInit }
 let fetchCalls: FetchCall[] = []
 let fetchHandler: (url: string, init?: RequestInit) => Promise<Response>
 
 beforeEach(() => {
+  alertSpies.alert.mockClear()
+  alertSpies.alertError.mockClear()
+  alertSpies.alertWarning.mockClear()
+  alertSpies.confirm.mockClear()
+  alertSpies.dangerConfirm.mockClear()
   fetchCalls = []
   fetchHandler = async () => new Response(JSON.stringify({ entries: [] }), { status: 200 })
   global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

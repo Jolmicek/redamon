@@ -51,6 +51,7 @@ function baseReportData(): any {
     graphqlScan: { totalFindings: 0, endpointsTested: 0, introspectionEnabled: 0, bySeverity: [], byType: [], endpoints: [], findings: [] },
     otx: { totalPulses: 0, totalMalware: 0, enrichedIps: 0, adversaries: [], pulses: [], malware: [] },
     vhostSni: { totalFindings: 0, ipsTested: 0, bySeverity: [], byType: [], findings: [] },
+    webCachePoison: { totalFindings: 0, confirmed: 0, strong: 0, bySeverity: [], byImpact: [], findings: [] },
     aiSurface: {
       totalAiEndpoints: 0, ragIngestEndpoints: 0, promptInjectableParams: 0,
       mcpServers: 0, mcpPoisoningFindings: 0, vectorDbs: 0,

@@ -66,9 +66,13 @@ describe('Workflow graph edges stay consistent', () => {
   })
 
   test('every tool in WORKFLOW_TOOLS has an output-map entry (SECTION_NODE_MAP)', () => {
+    // A few tools are pure enrichment (annotate existing nodes without creating
+    // new ones) and intentionally map to an empty output array — accept
+    // undefined OR empty for those, otherwise require a non-empty entry.
+    const PURE_ENRICHMENT = new Set(['EndpointAiClassifier'])
     for (const tool of WORKFLOW_TOOLS) {
       const outputs = SECTION_NODE_MAP[tool.id]
-      if (outputs !== undefined) {
+      if (outputs !== undefined && !PURE_ENRICHMENT.has(tool.id)) {
         expect(outputs.length).toBeGreaterThan(0)
       }
     }

@@ -41,6 +41,8 @@ def deny(desc, body, must_mention=None):
 
 # Make the test independent of env: pin the bind allowlist to /tmp/redamon.
 broker.ALLOWED_BIND_PREFIXES = ["/tmp/redamon"]
+# T1/T2: only /tmp/redamon is writable by default (source-tree binds must be ro).
+broker.ALLOWED_RW_PREFIXES = ["/tmp/redamon"]
 
 NAABU = "projectdiscovery/naabu:latest"
 
@@ -93,6 +95,30 @@ deny("VolumesFrom inherits another container's mounts",
 # C. emptying the default masked/readonly /proc paths
 deny("MaskedPaths emptied (unmask /proc)",
      {"Image": NAABU, "HostConfig": {"MaskedPaths": []}}, "MaskedPaths")
+
+print("=== T1/T2: mount-MODE enforcement (source-tree binds must be ro) ===")
+# Add the source tree ($PWD) as an allowed *read* prefix, as compose does.
+broker.ALLOWED_BIND_PREFIXES = ["/tmp/redamon", "/repo"]
+broker.ALLOWED_RW_PREFIXES = ["/tmp/redamon"]
+# rw of the writable scratch prefix stays allowed
+allow("rw bind of /tmp/redamon (explicit)", {"Image": NAABU, "HostConfig": {"Binds": ["/tmp/redamon/o:/o:rw"]}})
+allow("rw bind of /tmp/redamon (default mode)", {"Image": NAABU, "HostConfig": {"Binds": ["/tmp/redamon/o:/o"]}})
+# ro of the source tree is fine (tools read wordlists/templates from it)
+allow("ro bind of source tree", {"Image": NAABU, "HostConfig": {"Binds": ["/repo/recon:/app/recon:ro"]}})
+allow("ro source tree via Mounts (ReadOnly=true)", {"Image": NAABU,
+      "HostConfig": {"Mounts": [{"Type": "bind", "Source": "/repo/agentic/skills", "Target": "/s", "ReadOnly": True}]}})
+# rw of the source tree is the attack -> denied
+deny("rw bind of source tree (overwrite recon/main.py)",
+     {"Image": NAABU, "HostConfig": {"Binds": ["/repo/recon:/app/recon:rw"]}}, "read-write")
+deny("default-mode (rw) bind of an Agent Skill file",
+     {"Image": NAABU, "HostConfig": {"Binds": ["/repo/agentic/skills/x.md:/out"]}}, "read-write")
+deny("rw source tree via Mounts (ReadOnly=false)",
+     {"Image": NAABU, "HostConfig": {"Mounts": [{"Type": "bind", "Source": "/repo/recon", "Target": "/app/recon"}]}}, "read-write")
+deny("rw source tree via Mounts (ReadOnly explicitly false)",
+     {"Image": NAABU, "HostConfig": {"Mounts": [{"Type": "bind", "Source": "/repo", "Target": "/r", "ReadOnly": False}]}}, "read-write")
+# restore defaults for any later tests
+broker.ALLOWED_BIND_PREFIXES = ["/tmp/redamon"]
+broker.ALLOWED_RW_PREFIXES = ["/tmp/redamon"]
 
 print("=== pull policy ===")
 ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=projectdiscovery/naabu&tag=latest")

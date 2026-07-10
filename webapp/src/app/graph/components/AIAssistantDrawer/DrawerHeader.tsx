@@ -3,6 +3,7 @@
 import React, { useMemo } from 'react'
 import { Bot, Wifi, WifiOff, Loader2, AlertTriangle, Eye, EyeOff, History, Plus, Download, FolderOpen } from 'lucide-react'
 import { ConnectionStatus } from '@/lib/websocket-types'
+import { useTheme } from '@/hooks/useTheme'
 import { Tooltip } from '@/components/ui/Tooltip/Tooltip'
 import { ConversationHistory } from './ConversationHistory'
 import { formatTokenCount } from '@/lib/formatTokens'
@@ -51,8 +52,15 @@ export function DrawerHeader({
   handleDeleteConversation,
   handleHistoryNewChat,
 }: DrawerHeaderProps) {
-  const getConnectionStatusColor = () =>
-    status === ConnectionStatus.CONNECTED ? '#10b981' : '#ef4444'
+  const { isLight } = useTheme()
+
+  // The header is a dark strip in dark mode and a light strip in light mode, so
+  // the status color needs to shift: bright emerald/red read on the dark header,
+  // but on the light header they wash out, so use deeper shades for contrast.
+  const getConnectionStatusColor = () => {
+    if (status === ConnectionStatus.CONNECTED) return isLight ? '#047857' : '#10b981'
+    return isLight ? '#dc2626' : '#ef4444'
+  }
 
   const getConnectionStatusIcon = () => {
     const color = getConnectionStatusColor()

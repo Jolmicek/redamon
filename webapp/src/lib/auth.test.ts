@@ -18,6 +18,11 @@ import { hashPassword, verifyPassword, createToken, verifyToken, AUTH_COOKIE_NAM
 /* ------------------------------------------------------------------ */
 
 describe('hashPassword / verifyPassword', () => {
+  // bcrypt with 12 rounds is intentionally CPU-heavy; under parallel test
+  // contention a single hash+verify can exceed vitest's 5s default. Give the
+  // hashing tests a generous timeout so they measure correctness, not scheduling.
+  const BCRYPT_TIMEOUT = 30000
+
   test('hashes a password and verifies it', async () => {
     const hash = await hashPassword('mysecret')
     expect(hash).not.toBe('mysecret')
@@ -25,24 +30,24 @@ describe('hashPassword / verifyPassword', () => {
 
     const valid = await verifyPassword('mysecret', hash)
     expect(valid).toBe(true)
-  })
+  }, BCRYPT_TIMEOUT)
 
   test('rejects wrong password', async () => {
     const hash = await hashPassword('correct')
     const valid = await verifyPassword('wrong', hash)
     expect(valid).toBe(false)
-  })
+  }, BCRYPT_TIMEOUT)
 
   test('rejects empty hash', async () => {
     const valid = await verifyPassword('anything', '')
     expect(valid).toBe(false)
-  })
+  }, BCRYPT_TIMEOUT)
 
   test('different passwords produce different hashes', async () => {
     const hash1 = await hashPassword('password1')
     const hash2 = await hashPassword('password2')
     expect(hash1).not.toBe(hash2)
-  })
+  }, BCRYPT_TIMEOUT)
 
   test('same password produces different hashes (salt)', async () => {
     const hash1 = await hashPassword('same')
@@ -51,7 +56,7 @@ describe('hashPassword / verifyPassword', () => {
     // But both should verify
     expect(await verifyPassword('same', hash1)).toBe(true)
     expect(await verifyPassword('same', hash2)).toBe(true)
-  })
+  }, BCRYPT_TIMEOUT)
 })
 
 /* ------------------------------------------------------------------ */

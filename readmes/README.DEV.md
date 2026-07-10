@@ -663,6 +663,7 @@ This is the most important table for day-to-day development. It tells you exactl
 | `recon/requirements.txt` | `docker compose build recon && docker compose up -d recon-orchestrator` | Recon image rebuild; orchestrator spawns new containers from it |
 | `mcp/requirements.txt` | `docker compose build kali-sandbox && docker compose up -d kali-sandbox` | Same |
 | Any `Dockerfile` | `docker compose build <service> && docker compose up -d <service>` | Dockerfile changes always need rebuild |
+| Bump a pinned tool/model (T15/T17) | rebuild the affected image | `recon/Dockerfile`+`requirements.txt` and `knowledge_base/curation/pins.py` pin third-party pulls to commits/tags; a moved/removed pin **fails the build loudly**. Edit the pin, then rebuild. |
 | `docker-compose.yml` | `docker compose up -d` | Compose detects config changes and recreates affected containers |
 | `webapp/prisma/schema.prisma` | `docker compose exec webapp npx prisma db push` | Push schema changes to PostgreSQL |
 | New default value | Update ALL 4 layers + rebuild agent & webapp | See [checklist](#61-adding-a-new-project-setting) |

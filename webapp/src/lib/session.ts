@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken, verifyActAsToken, AUTH_COOKIE_NAME, ACT_AS_COOKIE_NAME } from './auth'
+import { constantTimeEqual } from './constantTimeEqual'
 
 export interface Session {
   userId: string
@@ -83,7 +84,23 @@ export function isInternalRequest(request: NextRequest): boolean {
   const key = request.headers.get('x-internal-key')
   const expected = process.env.INTERNAL_API_KEY
   if (!key || !expected || expected === 'changeme') return false
-  return key === expected
+  return constantTimeEqual(key, expected)
+}
+
+/**
+ * S3/E6: the LOWER-TIER scanner principal. Scan containers carry SCANNER_API_KEY
+ * (not the master INTERNAL_API_KEY) and legitimately read only their OSINT
+ * settings + project config. This returns true for a valid scanner key; callers
+ * must scope it to exactly GET /api/users/[id]/settings and GET /api/projects/[id]
+ * (the middleware allowlist enforces the route scope; these route handlers accept
+ * the principal). It is deliberately NOT accepted on llm-providers, tradecraft,
+ * or any user-CRUD route.
+ */
+export function isScannerRequest(request: NextRequest): boolean {
+  const key = request.headers.get('x-internal-key')
+  const expected = process.env.SCANNER_API_KEY
+  if (!key || !expected || expected === 'changeme') return false
+  return constantTimeEqual(key, expected)
 }
 
 /**

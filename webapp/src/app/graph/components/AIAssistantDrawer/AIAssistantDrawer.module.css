@@ -61,9 +61,144 @@
   gap: var(--space-2);
   flex-wrap: nowrap;
   padding: var(--space-3) var(--space-4);
-  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-primary) 40%, var(--color-crimson-800) 100%);
+  /* RedAmon "world" background, matching redamon.org: the dotted world map (red
+     dots on a dark red-to-black base) with a soft crimson glow blooming from the
+     left. Top/bottom fade keeps the dots from touching the header edges. This is
+     a branded strip, so it stays dark in both themes on purpose. */
+  background:
+    /* light top/bottom fade so the dots melt into the edges but stay vivid in the
+       middle band (low veil opacity keeps the red dots opaque). */
+    linear-gradient(to bottom, rgba(4, 2, 2, 0.6) 0%, rgba(4, 2, 2, 0.38) 45%, rgba(4, 2, 2, 0.48) 100%),
+    /* dotted world map (muted dark-red dots) */
+    url('/agent-worldmap.svg') 28% 42% / cover no-repeat,
+    /* soft crimson glow blooming from the left */
+    radial-gradient(70% 130% at 14% 45%, rgba(183, 28, 28, 0.28) 0%, transparent 55%),
+    /* dark red to black base */
+    linear-gradient(115deg, #140505 0%, #080202 55%, #030101 100%);
   border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
+}
+
+/* The header is a permanently-dark branded strip (world-map background), so every
+   element inside it uses fixed light-on-dark colors instead of theme variables
+   (which flip in light mode) and gets small backdrops / shadows to stay legible
+   over the busy dotted map. */
+.header .title {
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+.header .connectionStatus {
+  /* Applies to the green/red status text and the icon glyphs alike. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.header .subtitle {
+  font-weight: var(--font-semibold);
+}
+
+.header .sessionCode {
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.5);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.header .tokenTotal {
+  color: #bfdbfe;
+  background: rgba(0, 0, 0, 0.45);
+  border-color: rgba(96, 165, 250, 0.5);
+}
+
+.header .headerIcon {
+  /* Sits over the brightest part of the left glow, so it needs its own dark
+     plate and a brighter crimson stroke to separate from the red bloom. */
+  background: rgba(8, 3, 3, 0.55);
+  border-color: rgba(255, 120, 120, 0.9);
+  color: #ff6b6b;
+  box-shadow: 0 0 12px rgba(229, 57, 53, 0.35);
+}
+
+.header .iconButton,
+.header .closeButton {
+  background: rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.header .iconButton:hover:not(:disabled),
+.header .closeButton:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.header .iconButtonActive {
+  background: rgba(245, 158, 11, 0.22);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.6);
+}
+
+.header .iconButtonActive:hover {
+  background: rgba(245, 158, 11, 0.32);
+  color: #fbbf24;
+}
+
+/* ── Light mode: a red-and-white take on the same world background. White base,
+   red dotted map + soft red glow, and every element re-tuned to dark/red for
+   contrast on the light strip. ───────────────────────────────────────────── */
+:global([data-theme="light"]) .header {
+  background:
+    /* light white veil: fades the dots at the edges but keeps them visible in the
+       middle band so the red map reads clearly on white. */
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0) 45%, rgba(255, 255, 255, 0.16) 100%),
+    /* red dotted world map for the light background */
+    url('/agent-worldmap-light.svg') 28% 42% / cover no-repeat,
+    /* soft red glow from the left */
+    radial-gradient(70% 130% at 14% 45%, rgba(229, 57, 53, 0.16) 0%, transparent 55%),
+    /* white to pale-red base */
+    linear-gradient(115deg, #ffffff 0%, #fff4f4 55%, #ffe9e9 100%);
+}
+
+:global([data-theme="light"]) .header .title {
+  color: #b71c1c;
+  text-shadow: none;
+}
+
+:global([data-theme="light"]) .header .connectionStatus {
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.6);
+}
+
+:global([data-theme="light"]) .header .sessionCode {
+  color: #7f1d1d;
+  background: rgba(255, 245, 245, 0.92);
+  border-color: rgba(183, 28, 28, 0.4);
+}
+
+:global([data-theme="light"]) .header .tokenTotal {
+  color: #1d4ed8;
+  background: rgba(239, 244, 255, 0.92);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+:global([data-theme="light"]) .header .headerIcon {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: #d32f2f;
+  color: #d32f2f;
+  box-shadow: 0 0 10px rgba(229, 57, 53, 0.2);
+}
+
+:global([data-theme="light"]) .header .iconButton,
+:global([data-theme="light"]) .header .closeButton {
+  background: rgba(255, 255, 255, 0.72);
+  color: #4a1414;
+  border: 1px solid rgba(183, 28, 28, 0.22);
+}
+
+:global([data-theme="light"]) .header .iconButton:hover:not(:disabled),
+:global([data-theme="light"]) .header .closeButton:hover {
+  background: #ffffff;
+  color: #b71c1c;
+  border-color: rgba(183, 28, 28, 0.45);
 }
 
 .headerLeft {

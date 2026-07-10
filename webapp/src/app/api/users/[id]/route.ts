@@ -70,8 +70,9 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     const body = await request.json()
     const { name, email, role, defaultAgentModel, defaultAiPipelineModel } = body
 
-    // Check permissions
-    if (!isInternalRequest(request)) {
+    // Check permissions. S2/E2: internal-key no longer bypasses -- updating a
+    // user (esp. role escalation) requires a real session.
+    {
       const session = await getSession()
       if (!session) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -134,7 +135,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params
 
-    if (!isInternalRequest(request)) {
+    {  // S2/E2: deleting a user requires an admin session; no internal bypass.
       const session = await getSession()
       if (!session || session.role !== 'admin') {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

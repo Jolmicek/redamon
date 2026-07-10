@@ -81,6 +81,8 @@ SCAN_MODULES="domain_discovery,port_scan,http_probe" docker-compose run --rm rec
 | `Dockerfile` changes | `docker-compose build --no-cache` |
 | `.env` file changes | No rebuild needed (mounted as volume) |
 
+> **Pinned build artifacts (STRIDE T17).** The recon image build no longer pulls tools from moving refs: `recon/Dockerfile` pins ffuf (`@v2.1.0`), subjack/jsluice/masscan (commits), the SecLists + jhaddix wordlists (a commit / gist revision), and `recon/requirements.txt` pins knock + paramspider to commits. A moved or removed pinned artifact now **fails the build loudly** (a caught supply-chain change, not a silent runtime compromise). To bump a pin, edit the tag/commit in `recon/Dockerfile` or `recon/requirements.txt` and rebuild. (The auto-pulled sibling *tool containers* - naabu/httpx/nuclei/katana/gau/amass - are runtime images, out of T17 scope, and keep their `:latest` tags.)
+
 ---
 
 ## 🔗 Recon Orchestrator Integration

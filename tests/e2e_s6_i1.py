@@ -32,13 +32,13 @@ def b64d(x):
 
 
 s = requests.Session()
-EMAIL = f"e2e_{secrets.token_hex(6)}@redamon.local"
-PW = "Test1234!"
-
-# Fresh STANDARD user (guarantees the I1 cross-tenant test is meaningful).
-cr = requests.post(f"{WEB}/api/users", headers=H(**{"x-internal-key": IKEY}),
-                   data=json.dumps({"name": "e2e", "email": EMAIL, "password": PW, "role": "standard"}))
-check("create test user (standard)", cr.status_code in (201, 409), f"status {cr.status_code}")
+# S2/E2 (commit 135c077) removed the internal-key bypass on POST /api/users, so
+# the fresh STANDARD user is seeded directly in the DB by the shell wrapper
+# (tests/test_e2e_security_live.sh) and its credentials are handed in via env.
+# This test then only exercises the security surface (login, ws-ticket, I1).
+EMAIL = os.environ["E2E_EMAIL"]
+PW = os.environ.get("E2E_PW", "Test1234!")
+check("fixture user seeded (standard)", bool(EMAIL), f"email={EMAIL}")
 
 lg = s.post(f"{WEB}/api/auth/login", headers=H(),
             data=json.dumps({"email": EMAIL, "password": PW}))
@@ -47,7 +47,7 @@ check("login sets session cookie", lg.status_code == 200 and "redamon-auth" in s
 uid = lg.json().get("id")
 check("have authenticated userId", bool(uid), f"uid={uid}")
 
-pid = "e2e-project"
+pid = os.environ.get("E2E_PID", "e2e-project")  # a project the seeded user owns
 sid = "e2e-" + secrets.token_hex(8)
 
 tk = s.post(f"{WEB}/api/agent/ws-ticket", headers=H(), data=json.dumps({"projectId": pid, "sessionId": sid}))
@@ -132,11 +132,8 @@ check("I1 own read allowed (masked 200)", r.status_code == 200, f"status {r.stat
 r = requests.get(f"{WEB}/api/users/{VICTIM_ID}/llm-providers?internal=true", headers={"x-internal-key": IKEY})
 check("I1 agent internal-key path still works (200)", r.status_code == 200, f"status {r.status_code}")
 
-# cleanup the test user
-try:
-    requests.delete(f"{WEB}/api/users/{uid}", headers={"x-internal-key": IKEY})
-except Exception:
-    pass
+# The throwaway user is torn down by the shell wrapper (it was seeded there);
+# S2/E2 removed the internal-key DELETE bypass this used to rely on.
 
 passed = sum(results)
 print(f"\n=== E2E S6+I1 SUMMARY: {passed}/{len(results)} passed ===", flush=True)

@@ -606,6 +606,15 @@ The ingestion pipeline handles untrusted external data. Multiple defense layers 
 - **Constant-time comparison**: `hmac.compare_digest()` used for all digest checks
 - **Atomic writes**: All file writes use tempfile + fsync + rename pattern
 
+### Supply-chain integrity (STRIDE T15)
+
+- **Pinned feeds**: each curation feed (exploitdb/nuclei/gtfobins/lolbas/owasp) is fetched from an **immutable upstream commit** (manifest in `knowledge_base/curation/pins.py`), not a mutable `refs/heads/<branch>`, so a silently-mutated upstream cannot enter the corpus.
+- **Per-feed sha256**: an optional recorded hash is verified before extraction; a mismatch **fail-closes that one feed's ingest** (`PinMismatchError`) and leaves the prior corpus intact.
+- **NVD schema validation**: NVD (a live API, no commit-pin) responses are validated against a strict envelope schema; a non-conforming body (HTML/proxy payload) is rejected.
+- **Pinned models**: the embedder (`intfloat/e5-large-v2`) and reranker (`BAAI/bge-reranker-base`) load a **pinned HuggingFace revision**, not floating `main`.
+- **Hardened sidecar**: the `kb-refresh` container runs with `cap_drop: ALL` + pids/memory caps.
+- **Bump a pin**: edit the SHA/revision in `knowledge_base/curation/pins.py` and rebuild the agent + kb-refresh images (curation code is image-baked).
+
 ### Query Safety
 
 - **Cypher injection**: All Neo4j query values are parameterized. Interpolated identifiers (labels, property keys) pass through a strict `^[A-Za-z_][A-Za-z0-9_]*$` regex
@@ -1062,6 +1071,10 @@ If NVD ingestion is slow, register for a free API key:
 export NVD_API_KEY=your-key-here
 make kb-update-nvd
 ```
+
+### A feed's ingest aborted with a pin/hash mismatch (T15)
+
+If a build/refresh logs `... sha256 ... does not match pinned ...` and skips a feed, the fetched artifact no longer matches its recorded hash in `knowledge_base/curation/pins.py`. This is **fail-closed per-feed**: only that feed is aborted, the other feeds and the prior corpus are left intact. Usually the upstream source changed and the pin has not been bumped - update the commit SHA/sha256 in `pins.py` and rebuild (or investigate a possibly-tampered upstream before bumping). A wrong model revision instead surfaces as a `docker compose build agent` failure fetching the pinned embedder/reranker.
 
 ### Check index statistics
 

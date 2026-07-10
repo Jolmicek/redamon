@@ -77,9 +77,11 @@ So an admin has no "see everything" mode; to view a user's data they explicitly 
 - `guardProject(projectId)` - one-call guard for `[projectId]` routes (scan/analytics/workspace/graph): resolves the effective user and 404s if they don't own the project.
 - `requireProjectAccess(eff, projectId)` / `requireConversationAccess(eff, id)` / `requireProjectScopedResource(eff, loadProjectId)` - when you already hold the effective user.
 - `ownerScope(eff)` - a Prisma `where` fragment (`{ userId }`) for list endpoints; never trust a client-supplied `userId`/`projectId`.
-- `requireUserAccess(request, targetUserId)` (`lib/session.ts`) - for `users/[id]/*` routes (own-or-admin, with an `X-Internal-Key` carve-out for the agent).
+- `requireUserAccess(request, targetUserId)` (`lib/session.ts`) - for `users/[id]/*` READ routes (own-or-admin, with an `X-Internal-Key` carve-out for the agent). **Write** routes (POST `/api/users`, PUT/DELETE `/api/users/[id]`, POST `/api/users/[id]/llm-providers`) require an admin/owner **session** and do NOT accept the internal-key bypass, so an internal key can no longer mint an admin (STRIDE S2/E2). GET `/api/users/[id]/settings` additionally accepts the lower-tier `SCANNER_API_KEY` via `isScannerRequest` (STRIDE S3/E6).
 
-Cross-user access is reported as **404** (anti-enumeration). Enforcement is **on by default** and fails closed; set `ACCESS_ENFORCE=0` only to run a temporary log-only (`[BOLA] would-block ...`) observation phase. Service-to-service callers (the agent, cypherfix, scanners) present `X-Internal-Key` and are carved out via `isInternalRequest(request)` on the specific routes they call.
+Cross-user access is reported as **404** (anti-enumeration). Enforcement is **on by default** and fails closed; set `ACCESS_ENFORCE=0` only to run a temporary log-only (`[BOLA] would-block ...`) observation phase.
+
+**Internal callers (STRIDE S2/E2 + S3/E6).** The agent and cypherfix present `X-Internal-Key` (constant-time compared) and are carved out via `isInternalRequest(request)`, restricted to an **allowlist** of the exact routes they call (llm-providers/settings/tradecraft/projects GET, codefix-sandbox, conversations/by-session/*, remediations/*, global/tunnel-config). The allowlist is **log-only by default**; set `INTERNAL_KEY_ALLOWLIST_ENFORCE=true` to block off-allowlist internal-key requests once logs confirm only known routes. Scanners instead present a **lower-tier `SCANNER_API_KEY`** (`isScannerRequest`), accepted ONLY on GET `/api/users/[id]/settings` and GET `/api/projects/[id]` - never llm-providers or user-CRUD, so a compromised scanner cannot harvest LLM keys or mint an admin.
 
 **When adding a route:** derive identity from `getEffectiveUser()`/`requireUserAccess`, never from a query/body `userId`/`projectId`; add the ownership guard before any data read; and cover it with a cross-user 403/404 test. The live end-to-end check is `tests/test_e2e_bola_live.sh`.
 
@@ -442,6 +444,9 @@ Downloads the recon output JSON file for the project.
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://redamon:<POSTGRES_PASSWORD>@localhost:5432/redamon` (password from `.env`, generated on fresh install; host port loopback-only) |
 | `RECON_ORCHESTRATOR_URL` | Recon orchestrator service URL | `http://localhost:8010` |
 | `ORCHESTRATOR_API_KEY` | Sent as `X-Orchestrator-Key` on every orchestrator call; must match the orchestrator's value (auto-generated in `.env`) | (generated) |
+| `INTERNAL_API_KEY` | Master service-to-service key. Attached (as `x-internal-key`) when the webapp proxies to the agent's guarded endpoints; accepted (constant-time) on the internal-route allowlist | (generated) |
+| `SCANNER_API_KEY` | Lower-tier scanner token (S3/E6). Accepted only on GET `settings` + GET `projects`; cannot mint admins or read llm-providers | (generated) |
+| `INTERNAL_KEY_ALLOWLIST_ENFORCE` | When `true`, block internal-key requests to routes outside the allowlist; default is log-only | (unset = log-only) |
 | `NODE_ENV` | Environment mode | `development` |
 | `PORT` | Application port | `3000` |
 

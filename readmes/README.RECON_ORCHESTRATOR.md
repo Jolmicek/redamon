@@ -305,8 +305,13 @@ networks:
 > `127.0.0.1:8010` cannot drive the API without the key. The recon and partial-recon
 > containers it spawns do **not** receive the raw Docker socket — they mount a
 > filtering broker socket that only permits creating the known tool containers
-> (allowlisted images, scratch-directory mounts), so a compromised recon container
-> cannot mount the host filesystem, run privileged, or escape to the host.
+> (allowlisted images), so a compromised recon container cannot mount the host
+> filesystem, run privileged, or escape to the host. The broker also enforces the
+> mount **mode** (STRIDE T1/T2): a host path may be bound read-write only if it is
+> under `ALLOWED_RW_PREFIXES` (default `/tmp/redamon`); source-tree binds must be
+> `:ro`, so a compromised worker cannot overwrite `recon/main.py` or an Agent
+> Skill on the host. Overridable via `DOCKER_BROKER_ALLOWED_RW_PREFIXES` /
+> `ALLOWED_RW_VOLUMES`.
 
 ## Container Management
 
@@ -317,14 +322,24 @@ When starting a recon, the orchestrator:
 1. Removes any existing container with the same name
 2. Creates a new container with:
    - `network_mode: host` for scanning capabilities
-   - `NET_RAW` capability only (for `masscan`/`nmap` SYN scans); the container is
-     **not** privileged, so it has no host-device or mount access
+   - `NET_RAW` capability only (for `masscan`/`nmap` SYN scans), plus the D1
+     `pids_limit`/`nano_cpus` caps; the container is **not** privileged, so it has
+     no host-device or mount access. (STRIDE E6 note: a `cap_drop: [ALL]` /
+     `no-new-privileges` reduction was attempted and reverted - both hard-break
+     the recon container, since it writes into the host-owned bind-mounted source
+     tree (needs `CAP_DAC_OVERRIDE`) and the image ships setuid tooling. Cap
+     reduction is a documented residual; the scoped `SCANNER_API_KEY` is the
+     effective E6 control.)
    - Filtering broker socket for nested (sibling) container execution, restricted
      to the known tool images. It is served on the `redamon_broker_socket` named
      volume (mounted at `/var/run/broker`) and selected via the `DOCKER_HOST`
      env var; a named volume is used so the unix socket is shareable across
      containers on both macOS (Docker Desktop) and native Linux
-   - Environment variables: `PROJECT_ID`, `USER_ID`, `WEBAPP_API_URL`
+   - Environment variables: `PROJECT_ID`, `USER_ID`, `WEBAPP_API_URL`, and a
+     scoped **`SCANNER_API_KEY`** (STRIDE S3/E6) injected INSTEAD of the master
+     `INTERNAL_API_KEY` (falls back to the master key only pre-secret). It is
+     accepted by the webapp on GET settings + GET projects and by the agent on
+     `/llm/*`; it cannot mint admins or read llm-provider keys.
 
 ### Log Streaming Implementation
 

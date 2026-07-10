@@ -11,14 +11,26 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from 'vitest'
 import neo4j, { Driver, Session } from 'neo4j-driver'
+import prisma from '@/lib/prisma'
+import { createToken, AUTH_COOKIE_NAME } from '@/lib/auth'
 
 const NEO4J_URI      = process.env.NEO4J_URI      || 'bolt://localhost:7687'
 const NEO4J_USER     = process.env.NEO4J_USER     || 'neo4j'
 const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || 'password'
 const WEBAPP_URL     = process.env.REDZONE_TEST_WEBAPP_URL || 'http://localhost:3000'
-const INTERNAL_KEY   = process.env.INTERNAL_API_KEY
+const AUTH_SECRET    = process.env.AUTH_SECRET
 const PROJECT_ID     = `redzone-phaseB-${Date.now()}`
 const USER_ID        = 'redzone-phaseB-user'
+
+// BOLA remediation (commit 903e905) added guardProject/getEffectiveUser to these
+// routes: they now require a real login SESSION cookie and a Postgres project the
+// effective user owns, and the old `x-internal-key` bypass is no longer honored
+// (it now yields 401). So instead of the internal key we seed a throwaway
+// owner + project in Postgres and mint a REAL signed session cookie (createToken,
+// same AUTH_SECRET the server verifies with) scoped to our test project_id.
+const PG_USER_ID    = `u-${PROJECT_ID}`
+const PG_USER_EMAIL = `${PROJECT_ID}@redzone.itest`
+let authCookie = ''
 
 let driver: Driver
 let session: Session
@@ -28,9 +40,8 @@ async function run(cypher: string, params: Record<string, unknown> = {}): Promis
 }
 
 async function fetchRedZone(slug: string): Promise<any> {
-  if (!INTERNAL_KEY) throw new Error('INTERNAL_API_KEY env required')
   const res = await fetch(`${WEBAPP_URL}/api/analytics/redzone/${slug}?projectId=${PROJECT_ID}`, {
-    headers: { 'x-internal-key': INTERNAL_KEY },
+    headers: { cookie: authCookie },
   })
   if (!res.ok) {
     const text = await res.text()
@@ -39,7 +50,9 @@ async function fetchRedZone(slug: string): Promise<any> {
   return res.json()
 }
 
-const skipSuite = !INTERNAL_KEY
+// AUTH_SECRET is required to mint the session cookie the BOLA-guarded routes now
+// demand (see note above); skip cleanly when it is unavailable.
+const skipSuite = !AUTH_SECRET
 
 beforeAll(async () => {
   if (skipSuite) return
@@ -48,15 +61,31 @@ beforeAll(async () => {
   await driver.verifyConnectivity()
   await run(`MATCH (n {project_id: $pid}) DETACH DELETE n`, { pid: PROJECT_ID })
   await seedGraph()
+
+  // Seed the Postgres owner + project the route guard checks, then mint a real
+  // session cookie for that owner.
+  await prisma.$executeRaw`
+    INSERT INTO users (id, name, email, updated_at, password, role)
+    VALUES (${PG_USER_ID}, 'redzone-itest', ${PG_USER_EMAIL}, CURRENT_TIMESTAMP, 'x', 'standard')
+    ON CONFLICT (id) DO NOTHING`
+  await prisma.$executeRaw`
+    INSERT INTO projects (id, user_id, name, updated_at)
+    VALUES (${PROJECT_ID}, ${PG_USER_ID}, 'redzone-itest', CURRENT_TIMESTAMP)
+    ON CONFLICT (id) DO NOTHING`
+  const token = await createToken(PG_USER_ID, 'standard')
+  authCookie = `${AUTH_COOKIE_NAME}=${token}`
 }, 30_000)
 
 afterAll(async () => {
   if (skipSuite) return
   try {
     await run(`MATCH (n {project_id: $pid}) DETACH DELETE n`, { pid: PROJECT_ID })
+    await prisma.$executeRaw`DELETE FROM projects WHERE id = ${PROJECT_ID}`
+    await prisma.$executeRaw`DELETE FROM users WHERE id = ${PG_USER_ID}`
   } finally {
     await session?.close()
     await driver?.close()
+    await prisma.$disconnect()
   }
 }, 30_000)
 

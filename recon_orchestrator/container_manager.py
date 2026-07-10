@@ -294,6 +294,70 @@ class ContainerManager:
         floor = 512 * 1024 ** 2
         return max(floor, envelope, cap)
 
+    def _container_cpu_limit(self) -> Optional[int]:
+        """D1: hard per-container CPU ceiling (nano_cpus) for a spawned scan,
+        sized PROPORTIONAL to the detected core count (CONTAINER_CPU_FRACTION of
+        the host's cores), clamped to an absolute PER_CONTAINER_CPUS ceiling.
+        This is the one cap that scales with the machine. Falls open (None → no
+        cpu cap) when the governor is disabled or the fraction is non-positive."""
+        if not rg.governor_enabled():
+            return None
+        fraction = rg._env_float("CONTAINER_CPU_FRACTION", 0.5)
+        if fraction <= 0:
+            return None
+        cpus = max(1.0, rg.cpu_cores() * fraction)
+        per_max = rg._env_float("PER_CONTAINER_CPUS", 0.0)
+        if per_max > 0:
+            cpus = min(cpus, per_max)
+        return int(cpus * 1_000_000_000)
+
+    def _container_pids_limit(self) -> Optional[int]:
+        """D1: fixed generous PID ceiling for a spawned scan. Deliberately NOT
+        core-proportional — a fork bomb is stopped by any finite ceiling, and
+        scaling pids to core count risks under-capping on big hosts. Mirrors
+        start_codefix_sandbox's pids_limit=512. Falls open when governor off."""
+        if not rg.governor_enabled():
+            return None
+        try:
+            return max(1, int(os.environ.get("CONTAINER_PIDS_MAX", "512")))
+        except (TypeError, ValueError):
+            return 512
+
+    def _scanner_env(self) -> dict:
+        """S3/E6: give scan spawns the SCOPED scanner token instead of the master
+        INTERNAL_API_KEY, so a compromised scanner cannot mint an admin, harvest
+        LLM-provider keys, or reach the control plane. Falls back to the master
+        key ONLY when SCANNER_API_KEY is unset/placeholder (pre-secret installs),
+        so an operator who runs `up` before `update` is never hard-broken; the
+        scope closes automatically once redamon.sh generates the key."""
+        scanner = os.environ.get("SCANNER_API_KEY", "")
+        if scanner and scanner != "changeme":
+            return {"SCANNER_API_KEY": scanner}
+        return {"INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", "")}
+
+    def _scanner_hardening(self, drop_caps: bool = False) -> dict:
+        """S3/E6 per-spawn privilege reduction (D1 pattern). Returns kwargs to
+        splat into containers.run(). Kept as the single hook for future cap
+        tightening; drop_caps is currently False at every call site.
+
+        The privilege reduction is a documented RESIDUAL - the scoped
+        SCANNER_API_KEY (the primary S3/E6 win) is what closes the escalation and
+        it applies to every spawn. Two container-level hardenings were attempted
+        and reverted because they hard-break recon on this deployment:
+          - security_opt no-new-privileges: makes the recon image unable to exec
+            ANY binary ("operation not permitted", even python) on this runtime -
+            the image ships setuid tooling (su/mount, ping+cap).
+          - cap_drop:[ALL]: strips CAP_DAC_OVERRIDE, so root-in-container can no
+            longer write into the HOST-OWNED bind-mounted source tree (the recon
+            entrypoint mkdir's /app/recon/data/... and writes output there) -
+            container exits immediately with "Permission denied".
+        Re-enabling either requires re-adding the exact caps the entrypoint needs
+        (DAC_OVERRIDE/CHOWN/FOWNER/SETUID/SETGID/NET_RAW), verified per image."""
+        kw: dict = {}
+        if drop_caps:
+            kw["cap_drop"] = ["ALL"]
+        return kw
+
     def reconcile_reservations(self) -> int:
         """Release reservations for scans that are no longer active. Call
         periodically (reaper) so nothing leaks even if a spawn/terminal path is
@@ -451,7 +515,7 @@ class ContainerManager:
                     "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                     "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
                     "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                    **self._scanner_env(),  # S3/E6: scoped scanner token
                     # Agent API for AI hooks (FFuf AI extensions, etc.)
                     "AGENT_API_URL": os.environ.get("AGENT_API_URL", "http://localhost:8090"),
                     # The recon CLI (docker run/pull/info) honors DOCKER_HOST, so
@@ -481,6 +545,9 @@ class ContainerManager:
                     "nuclei-templates": {"bind": "/opt/nuclei-templates-official", "mode": "ro"},
                 },
                 mem_limit=self._container_mem_limit("full_recon"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
+                **self._scanner_hardening(drop_caps=False),  # S3/E6: cap_drop deferred (breaks writes to host-owned source bind mount; needs CAP_DAC_OVERRIDE)
                 command="python /app/recon/main.py",
             )
 
@@ -1188,7 +1255,7 @@ class ContainerManager:
                     "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                     "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
                     "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                    **self._scanner_env(),  # S3/E6: scoped scanner token
                     # Agent API for AI hooks (FFuf AI extensions, etc.)
                     "AGENT_API_URL": os.environ.get("AGENT_API_URL", "http://localhost:8090"),
                     # The recon CLI (docker run/pull/info) honors DOCKER_HOST, so
@@ -1213,6 +1280,9 @@ class ContainerManager:
                     "nuclei-templates": {"bind": "/opt/nuclei-templates-official", "mode": "ro"},
                 },
                 mem_limit=self._container_mem_limit("partial_recon"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
+                **self._scanner_hardening(drop_caps=False),  # S3/E6: cap_drop deferred (breaks writes to host-owned source bind mount; needs CAP_DAC_OVERRIDE)
                 command="python /app/recon/partial_recon.py",
             )
 
@@ -1568,6 +1638,9 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.ai_attack_image,
                 mem_limit=self._container_mem_limit("ai_attack"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
+                **self._scanner_hardening(drop_caps=False),  # S3/E6: cap_drop deferred (residual; not verifiable here)
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -1586,7 +1659,7 @@ class ContainerManager:
                     "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                     "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
                     "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                    **self._scanner_env(),  # S3/E6: scoped scanner token
                 },
                 volumes={
                     "/tmp/redamon": {"bind": "/tmp/redamon", "mode": "rw"},
@@ -1930,6 +2003,9 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.gvm_image,
                 mem_limit=self._container_mem_limit("gvm"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
+                **self._scanner_hardening(drop_caps=False),  # S3/E6: cap_drop deferred (residual; not verifiable here)
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -1946,7 +2022,7 @@ class ContainerManager:
                     "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                     "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
                     "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                    **self._scanner_env(),  # S3/E6: scoped scanner token
                     # GVM connection settings
                     "GVM_SOCKET_PATH": os.environ.get("GVM_SOCKET_PATH", "/run/gvmd/gvmd.sock"),
                     "GVM_USERNAME": os.environ.get("GVM_USERNAME", "admin"),
@@ -2326,6 +2402,9 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.github_hunt_image,
                 mem_limit=self._container_mem_limit("github_hunt"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
+                **self._scanner_hardening(drop_caps=False),  # S3/E6: cap_drop deferred (residual; not verifiable here)
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -2342,7 +2421,7 @@ class ContainerManager:
                     "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                     "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
                     "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                    **self._scanner_env(),  # S3/E6: scoped scanner token
                 },
                 volumes={
                     # GitHub hunt output (read-write, for saving results)
@@ -2708,6 +2787,9 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.trufflehog_image,
                 mem_limit=self._container_mem_limit("trufflehog"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
+                **self._scanner_hardening(drop_caps=False),  # S3/E6: cap_drop deferred (residual; not verifiable here)
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -2724,7 +2806,7 @@ class ContainerManager:
                     "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                     "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
                     "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
-                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                    **self._scanner_env(),  # S3/E6: scoped scanner token
                 },
                 volumes={
                     # TruffleHog output (read-write, for saving results)

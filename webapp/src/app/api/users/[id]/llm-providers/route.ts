@@ -72,9 +72,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params
 
-    // Ownership: only the account owner (or admin), or a trusted internal
-    // caller, may create providers for this user id.
-    if (!isInternalRequest(request)) {
+    // Ownership: only the account owner (or admin) may create providers for
+    // this user id. S2/E2: the internal-key bypass is removed -- no production
+    // internal caller creates providers, and a leaked key must not be able to
+    // add a provider (and thus a harvestable secret) to an arbitrary account.
+    {
       const session = await getSession()
       if (!session) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

@@ -194,6 +194,8 @@ describe('formatGraphRecords', () => {
     relId = 100,
   ) {
     return {
+      // Neo4j records expose a `keys` array; formatGraphRecords iterates it.
+      keys: ['n', 'm', 'r'],
       get(key: string) {
         if (key === 'n') return source
         if (key === 'm') return target
@@ -248,8 +250,13 @@ describe('formatGraphRecords', () => {
     expect(result.links).toEqual([])
   })
 
-  test('skips records with null nodes', () => {
+  test('skips null node values but keeps valid nodes', () => {
+    // A record where the `n` field is null (e.g. from an OPTIONAL MATCH miss).
+    // The formatter scans every key and registers only valid Node objects, so
+    // the null `n` contributes nothing while the valid `m` node still registers
+    // — and, crucially, the null value does not crash the formatter.
     const nullRecord = {
+      keys: ['n', 'm', 'r'],
       get(key: string) {
         if (key === 'n') return null
         if (key === 'm') return makeNode('Sub', { name: 'test' }, 5)
@@ -258,8 +265,10 @@ describe('formatGraphRecords', () => {
       },
     }
     const result = formatGraphRecords([nullRecord])
-    expect(result.nodes).toEqual([])
-    expect(result.links).toEqual([])
+    // Only the valid node registers; the null `n` produced no node.
+    expect(result.nodes).toHaveLength(1)
+    expect(result.nodes[0].id).toBe('5')
+    expect(result.nodes[0].name).toBe('test')
   })
 
   test('serializes Neo4j Int64 properties', () => {

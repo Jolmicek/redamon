@@ -3686,6 +3686,16 @@ flowchart TB
     MEMORY --> RESUME
 ```
 
+### Internal-Endpoint Authentication (STRIDE D3)
+
+The agent's billed-LLM REST endpoints - `/llm/ffuf-extensions`, `/llm/nuclei-tags`, `/llm/waf-classify`, `/llm/nuclei-fp-filter`, `/llm/takeover-classify`, `/guardrail/check-target`, `/roe/parse`, `/models`, `/llm-provider/test` - are gated by `agentic/llm_guard.py` (a FastAPI dependency):
+
+- **Auth**: constant-time (`hmac.compare_digest`) `X-Internal-Key`, accepting either `INTERNAL_API_KEY` or the scoped `SCANNER_API_KEY`. Fails **open** with a one-time warning only when neither secret is set (dev), closing as soon as the key exists.
+- **Rate limit**: a stdlib token bucket keyed by `(user_id, source-ip)` (`LLM_GUARD_RATE_CAPACITY`, `LLM_GUARD_RATE_REFILL_PER_SEC`).
+- **Spend cap**: a per-user rolling daily call ceiling (`LLM_GUARD_DAILY_CALL_CAP`), returning 429 when exceeded.
+
+So multi-tenant isolation is now enforced at the API layer too (auth + rate + spend), not only at the database-query level. The webapp proxies and recon planners attach the key automatically.
+
 ### Phase-Based Access Control
 
 ```mermaid

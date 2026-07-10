@@ -82,6 +82,16 @@ _DEFAULT_BIND_PREFIXES = ["/tmp/redamon"]
 ALLOWED_BIND_PREFIXES = _DEFAULT_BIND_PREFIXES + _csv_env("DOCKER_BROKER_ALLOWED_BIND_PREFIXES")
 ALLOWED_VOLUMES = set(_csv_env("DOCKER_BROKER_ALLOWED_VOLUMES")) | {"nuclei-templates"}
 
+# T1/T2: host paths a tool container may bind READ-WRITE. Any other allowed
+# host path (e.g. the source tree under ${PWD}, which is an allowed *read*
+# prefix so tools can mount wordlists/output ro) may be bound only :ro.
+# Legit sub-tool spawns write exclusively under /tmp/redamon; everything else
+# they mount is already :ro (targets, wordlists, work dirs, nuclei-templates).
+# This closes the "bind ${PWD} rw and overwrite recon/main.py or a Skill" path.
+_DEFAULT_RW_PREFIXES = ["/tmp/redamon"]
+ALLOWED_RW_PREFIXES = _DEFAULT_RW_PREFIXES + _csv_env("DOCKER_BROKER_ALLOWED_RW_PREFIXES")
+ALLOWED_RW_VOLUMES = set(_csv_env("DOCKER_BROKER_ALLOWED_RW_VOLUMES"))
+
 # Capabilities a tool container may request (naabu SYN etc.). Everything else
 # (SYS_ADMIN, SYS_PTRACE, ALL, ...) is denied.
 ALLOWED_CAPS = {"NET_RAW", "NET_ADMIN", "CAP_NET_RAW", "CAP_NET_ADMIN"}
@@ -137,6 +147,19 @@ def _bind_source_allowed(source: str) -> bool:
     return source in ALLOWED_VOLUMES
 
 
+def _rw_host_path_allowed(source: str) -> bool:
+    """T1/T2: is this host path allowed to be bound READ-WRITE?"""
+    norm = os.path.normpath(source)
+    return any(norm == p.rstrip("/") or norm.startswith(p.rstrip("/") + "/")
+               for p in ALLOWED_RW_PREFIXES)
+
+
+def _bind_is_readonly(opts: str) -> bool:
+    """A docker bind mode field is comma-separated (e.g. 'ro', 'ro,z', 'rw').
+    Read-only iff the 'ro' token is present; default (no field) is read-write."""
+    return "ro" in [o.strip() for o in opts.split(",") if o.strip()]
+
+
 def validate_create(body: dict) -> tuple[bool, str]:
     """Return (allowed, reason) for a POST /containers/create body."""
     image = body.get("Image", "")
@@ -177,21 +200,44 @@ def validate_create(body: dict) -> tuple[bool, str]:
         if "unconfined" in str(so):
             return False, f"SecurityOpt {so} denied"
 
-    # Binds: ["src:dst", "src:dst:ro", ...]
+    # Binds: ["src:dst", "src:dst:ro", "src:dst:rw,z", ...]
     for b in hc.get("Binds") or []:
-        src = str(b).split(":")[0]
+        parts = str(b).split(":")
+        src = parts[0]
         if not _bind_source_allowed(src):
             return False, f"bind mount not allowed: {b!r}"
+        # T1/T2: enforce mount MODE, not just the source path. A host path may
+        # be bound rw only if it is under an ALLOWED_RW_PREFIXES prefix; every
+        # other allowed host path (the source tree) must be :ro.
+        opts = parts[2] if len(parts) >= 3 else ""
+        if src.startswith("/") and not _bind_is_readonly(opts) \
+                and not _rw_host_path_allowed(src):
+            return False, (
+                f"read-write bind of {src!r} denied — source-tree binds must be "
+                f":ro; only {ALLOWED_RW_PREFIXES} may be mounted rw"
+            )
 
-    # Mounts: [{Type, Source, Target, ...}]
+    # Mounts: [{Type, Source, Target, ReadOnly, ...}]
     for m in hc.get("Mounts") or []:
         mtype = m.get("Type")
         if mtype == "bind":
-            if not _bind_source_allowed(m.get("Source", "")):
-                return False, f"bind mount not allowed: {m.get('Source')!r}"
+            src = m.get("Source", "")
+            if not _bind_source_allowed(src):
+                return False, f"bind mount not allowed: {src!r}"
+            # T1/T2: Mounts carry mode via the ReadOnly flag (default False = rw).
+            if src.startswith("/") and not m.get("ReadOnly") \
+                    and not _rw_host_path_allowed(src):
+                return False, (
+                    f"read-write bind of {src!r} denied — source-tree binds must "
+                    f"be ReadOnly; only {ALLOWED_RW_PREFIXES} may be mounted rw"
+                )
         elif mtype == "volume":
             if m.get("Source") and m.get("Source") not in ALLOWED_VOLUMES:
                 return False, f"volume not allowed: {m.get('Source')!r}"
+            # A named volume may be mounted rw only if allowlisted for writes.
+            if m.get("Source") and not m.get("ReadOnly") \
+                    and ALLOWED_RW_VOLUMES and m.get("Source") not in ALLOWED_RW_VOLUMES:
+                return False, f"read-write volume {m.get('Source')!r} denied"
         elif mtype:
             return False, f"mount type not allowed: {mtype}"
 

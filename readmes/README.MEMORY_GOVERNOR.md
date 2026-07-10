@@ -261,8 +261,8 @@ flowchart LR
     end
 ```
 
-1. **Always-on services** (`docker-compose.yml`): `mem_limit` on neo4j, postgres, agent,
-   orchestrator, webapp, kali, gvmd. Neo4j also gets explicit JVM `heap` + `pagecache` env,
+1. **Always-on services** (`docker-compose.yml`): `mem_limit` (plus `pids_limit` + `cpus`, D1)
+   on neo4j, postgres, agent, orchestrator, webapp, kali, gvmd, docker-broker. Neo4j also gets explicit JVM `heap` + `pagecache` env,
    because a `mem_limit` alone OOM-kills the JVM, the container limit must exceed
    heap + pagecache + overhead. Values default to safe constants and are overridden by
    host-adaptive values exported from `redamon.sh` (§9).
@@ -271,7 +271,8 @@ flowchart LR
    gets `cap = clamp( envelope × CONTAINER_CAP_HEADROOM , envelope , PER_CONTAINER_MAX )`.
    Floored at the envelope so a normal peak is never killed; clamped at `PER_CONTAINER_MAX`
    (a large fraction of host RAM) so one container can never take the whole host and starve
-   the DB. Returns `None` (no limit) when the governor is disabled.
+   the DB. Returns `None` (no limit) when the governor is disabled. Each spawn additionally
+   receives a CPU cap (`_container_cpu_limit()`) and a PID cap (`_container_pids_limit()`, D1).
 3. **Sibling tool containers** (`docker_broker/broker.py`): the recon container spawns
    naabu/httpx/katana/… as *separate top-level containers* through the docker-broker's
    filtered socket, so the recon container's own `mem_limit` cannot reach them. The broker
@@ -280,9 +281,15 @@ flowchart LR
    2 GB) into the create body, re-serialises it, and rewrites `Content-Length` before
    forwarding. The injection is strictly additive, it never relaxes a deny rule.
 
-There are **no CPU caps anywhere**, by design: CPU oversubscription only causes the scheduler
-to time-slice (graceful slowdown), never OOM; a CPU cap would throttle idle cores. Bounding
-the job/session/container count already bounds CPU contention.
+**CPU and PID caps (STRIDE D1).** As of the 2026-07 hardening wave, memory is no longer the
+only capped resource. Each of the 6 scan spawns also gets a **CPU cap**
+(`container_manager._container_cpu_limit()` -> `nano_cpus = CONTAINER_CPU_FRACTION x detected
+cores`, clamped to `PER_CONTAINER_CPUS`; the one machine-proportional knob) and a **PID cap**
+(`_container_pids_limit()` -> fixed `CONTAINER_PIDS_MAX`, default 512), both fail-open when the
+governor is disabled. `docker-compose.yml` sets `pids_limit` + `cpus` (env-overridable) on the
+always-on services and the Kali sandbox too. The memory rationale still holds (CPU
+oversubscription only time-slices, never OOMs), but a fixed PID ceiling stops a fork bomb and a
+generous CPU cap stops one container from monopolising the host.
 
 ---
 
@@ -471,6 +478,9 @@ Each is computed at spawn from the RAM-scaled envelope × headroom, clamped to
 | `TRUFFLEHOG_MEM` | TruffleHog scan container cap. |
 | `PER_CONTAINER_MAX` | `~55%` of host, absolute ceiling any single container may use, so one can't take the whole host. |
 | `CONTAINER_CAP_HEADROOM` | `1.5`, multiplier setting each cap above the admission envelope, so a normal peak is never killed. |
+| `CONTAINER_CPU_FRACTION` | `0.5` (D1), fraction of detected host cores each scan spawn may use (`nano_cpus`); `0` disables the CPU cap. |
+| `PER_CONTAINER_CPUS` | absolute per-spawn CPU ceiling in cores (unset = no ceiling); clamps `CONTAINER_CPU_FRACTION x cores`. |
+| `CONTAINER_PIDS_MAX` | `512` (D1), fixed PID ceiling per scan spawn - stops a fork bomb. |
 
 ### Always-on service caps (compose)
 
@@ -480,6 +490,7 @@ Each is computed at spawn from the RAM-scaled envelope × headroom, clamped to
 | `NEO4J_PAGECACHE` | neo4j page-cache size. |
 | `NEO4J_MEM` | neo4j container `mem_limit`; derived as heap + pagecache + overhead (never below the heap). |
 | `GVMD_MEM`, `AGENT_MEM`, `RECON_ORCHESTRATOR_MEM`, `WEBAPP_MEM`, `POSTGRES_MEM`, `KALI_MEM` | container `mem_limit` for each always-on service. |
+| `<SVC>_PIDS`, `<SVC>_CPUS` | D1: per-service `pids_limit` / `cpus` overrides (POSTGRES/NEO4J/AGENT/WEBAPP/RECON_ORCHESTRATOR/DOCKER_BROKER/KALI), generous env defaults. |
 | `WEBAPP_DEV_MEM` | `4g`, dev-mode override (`up dev`); `next dev` compilation needs far more than prod, so the 1 GB prod cap is relaxed here. |
 
 ### Sibling tool containers (broker)
@@ -487,7 +498,7 @@ Each is computed at spawn from the RAM-scaled envelope × headroom, clamped to
 | Var | Default | Meaning |
 |---|---|---|
 | `BROKER_TOOL_MEM_BYTES` | `2g` | hard memory cap injected into every sibling tool container (katana/nuclei/…). |
-| `BROKER_TOOL_PIDS` | `0` (unset) | optional PIDs limit for sibling containers; `0` = don't set. Parsed defensively (a bad value can't crash the broker). |
+| `BROKER_TOOL_PIDS` | `512` (D1) | PIDs limit injected into every sibling tool container (was `0`/unlimited); `0` disables. Parsed defensively (a bad value can't crash the broker). |
 
 ### Startup gate & zram (redamon.sh)
 

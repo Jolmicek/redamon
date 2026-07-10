@@ -137,11 +137,14 @@ describe('POST /api/users/[id]/llm-providers — I1 ownership', () => {
     expect(mockCreate).toHaveBeenCalled()
   })
 
-  test('internal-key caller may create for any user → 201', async () => {
+  test('S2/E2: internal-key caller can NO LONGER create providers (bypass removed) → 401, no write', async () => {
+    // Was 201 (internal key bypassed ownership). Now key possession alone must
+    // not be able to attach a harvestable secret to an arbitrary account.
     mockIsInternal.mockReturnValue(true)
+    mockGetSession.mockResolvedValue(null)
     const res = await POST(postReq('anyuser', NEW_PROVIDER), params('anyuser'))
-    expect(res.status).toBe(201)
-    expect(mockCreate).toHaveBeenCalled()
+    expect(res.status).toBe(401)
+    expect(mockCreate).not.toHaveBeenCalled()
   })
 
   test('no session, no key → 401, no write', async () => {
