@@ -294,6 +294,35 @@ class ContainerManager:
         floor = 512 * 1024 ** 2
         return max(floor, envelope, cap)
 
+    def _container_cpu_limit(self) -> Optional[int]:
+        """D1: hard per-container CPU ceiling (nano_cpus) for a spawned scan,
+        sized PROPORTIONAL to the detected core count (CONTAINER_CPU_FRACTION of
+        the host's cores), clamped to an absolute PER_CONTAINER_CPUS ceiling.
+        This is the one cap that scales with the machine. Falls open (None → no
+        cpu cap) when the governor is disabled or the fraction is non-positive."""
+        if not rg.governor_enabled():
+            return None
+        fraction = rg._env_float("CONTAINER_CPU_FRACTION", 0.5)
+        if fraction <= 0:
+            return None
+        cpus = max(1.0, rg.cpu_cores() * fraction)
+        per_max = rg._env_float("PER_CONTAINER_CPUS", 0.0)
+        if per_max > 0:
+            cpus = min(cpus, per_max)
+        return int(cpus * 1_000_000_000)
+
+    def _container_pids_limit(self) -> Optional[int]:
+        """D1: fixed generous PID ceiling for a spawned scan. Deliberately NOT
+        core-proportional — a fork bomb is stopped by any finite ceiling, and
+        scaling pids to core count risks under-capping on big hosts. Mirrors
+        start_codefix_sandbox's pids_limit=512. Falls open when governor off."""
+        if not rg.governor_enabled():
+            return None
+        try:
+            return max(1, int(os.environ.get("CONTAINER_PIDS_MAX", "512")))
+        except (TypeError, ValueError):
+            return 512
+
     def reconcile_reservations(self) -> int:
         """Release reservations for scans that are no longer active. Call
         periodically (reaper) so nothing leaks even if a spawn/terminal path is
@@ -481,6 +510,8 @@ class ContainerManager:
                     "nuclei-templates": {"bind": "/opt/nuclei-templates-official", "mode": "ro"},
                 },
                 mem_limit=self._container_mem_limit("full_recon"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
                 command="python /app/recon/main.py",
             )
 
@@ -1213,6 +1244,8 @@ class ContainerManager:
                     "nuclei-templates": {"bind": "/opt/nuclei-templates-official", "mode": "ro"},
                 },
                 mem_limit=self._container_mem_limit("partial_recon"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
                 command="python /app/recon/partial_recon.py",
             )
 
@@ -1568,6 +1601,8 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.ai_attack_image,
                 mem_limit=self._container_mem_limit("ai_attack"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -1930,6 +1965,8 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.gvm_image,
                 mem_limit=self._container_mem_limit("gvm"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -2326,6 +2363,8 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.github_hunt_image,
                 mem_limit=self._container_mem_limit("github_hunt"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
                 name=container_name,
                 detach=True,
                 network_mode="host",
@@ -2708,6 +2747,8 @@ class ContainerManager:
             container = self.client.containers.run(
                 self.trufflehog_image,
                 mem_limit=self._container_mem_limit("trufflehog"),  # Memory governor (Part 4c)
+                pids_limit=self._container_pids_limit(),  # D1: fork-bomb ceiling
+                nano_cpus=self._container_cpu_limit(),  # D1: core-proportional CPU cap
                 name=container_name,
                 detach=True,
                 network_mode="host",

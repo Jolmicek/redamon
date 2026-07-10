@@ -21,6 +21,8 @@ services:
     image: postgres:16-alpine
     container_name: redamon-postgres
     mem_limit: ${POSTGRES_MEM:-1g}          # Memory governor (Part 4)
+    pids_limit: ${POSTGRES_PIDS:-512}       # D1: fork-bomb ceiling (generous)
+    cpus: ${POSTGRES_CPUS:-4}               # D1: CPU cap (generous; host has more)
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-redamon}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-redamon_secret}
@@ -50,6 +52,8 @@ services:
     # the JVM is OOM-killed. redamon.sh export_resource_caps sizes these to the
     # host; the defaults keep heap+pagecache (3G) well inside the 4.5G limit.
     mem_limit: ${NEO4J_MEM:-4608m}
+    pids_limit: ${NEO4J_PIDS:-1024}         # D1: fork-bomb ceiling (generous)
+    cpus: ${NEO4J_CPUS:-8}                   # D1: CPU cap (generous)
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme123}
       NEO4J_PLUGINS: '["apoc"]'
@@ -337,6 +341,9 @@ services:
     image: redamon-docker-broker:latest
     container_name: redamon-docker-broker
     restart: unless-stopped
+    mem_limit: ${DOCKER_BROKER_MEM:-512m}   # D1: memory cap (was uncapped)
+    pids_limit: ${DOCKER_BROKER_PIDS:-256}  # D1: fork-bomb ceiling
+    cpus: ${DOCKER_BROKER_CPUS:-2}          # D1: CPU cap (generous)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock          # real socket (forward target)
       - redamon_broker_socket:/var/run/broker              # named volume; lives in the Linux VM so the unix socket is shareable on macOS + Linux
@@ -355,7 +362,9 @@ services:
       # Memory governor (Part 4d): hard memory cap injected into every sibling
       # tool container (katana/nuclei/httpx/...). Default ~2g; PIDS 0 = unset.
       BROKER_TOOL_MEM_BYTES: ${BROKER_TOOL_MEM_BYTES:-2g}
-      BROKER_TOOL_PIDS: ${BROKER_TOOL_PIDS:-0}
+      # D1: fork-bomb ceiling injected into every sibling tool container
+      # (katana/nuclei/httpx/...). Was 0 (unlimited); 512 is generous per tool.
+      BROKER_TOOL_PIDS: ${BROKER_TOOL_PIDS:-512}
     healthcheck:
       test: ["CMD-SHELL", "test -S /var/run/broker/docker.sock"]
       interval: 15s
@@ -367,6 +376,8 @@ services:
     build: ./recon_orchestrator
     container_name: redamon-recon-orchestrator
     mem_limit: ${RECON_ORCHESTRATOR_MEM:-1g}   # Memory governor (Part 4)
+    pids_limit: ${RECON_ORCHESTRATOR_PIDS:-512}  # D1: fork-bomb ceiling
+    cpus: ${RECON_ORCHESTRATOR_CPUS:-4}          # D1: CPU cap (generous)
     ports:
       # V1 isolation: bind to host loopback only. Reachable from the host (debug)
       # but NOT from bridge containers via the gateway IP (closes the back door).
@@ -464,6 +475,11 @@ services:
       network: host
     container_name: redamon-kali
     mem_limit: ${KALI_MEM:-1g}              # Memory governor (Part 4)
+    # D1 owns the Kali sandbox's pids/cpu ceiling (E1 was removed). Very
+    # generous because the interactive terminal runs arbitrary tools that may
+    # spawn many procs; still finite, so a fork bomb via kali_shell is bounded.
+    pids_limit: ${KALI_PIDS:-4096}          # D1: generous fork-bomb ceiling
+    cpus: ${KALI_CPUS:-10}                   # D1: CPU cap (generous)
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -574,6 +590,8 @@ services:
         SKIP_KB: "${SKIP_KB:-false}"
     container_name: redamon-agent
     mem_limit: ${AGENT_MEM:-3g}             # Memory governor (Part 4)
+    pids_limit: ${AGENT_PIDS:-1024}         # D1: fork-bomb ceiling (generous)
+    cpus: ${AGENT_CPUS:-8}                   # D1: CPU cap (generous)
     env_file:
       - path: .env
         required: false
@@ -755,6 +773,8 @@ services:
         REDAMON_VERSION: "${REDAMON_VERSION:-0.0.0}"
     container_name: redamon-webapp
     mem_limit: ${WEBAPP_MEM:-1g}            # Memory governor (Part 4)
+    pids_limit: ${WEBAPP_PIDS:-512}         # D1: fork-bomb ceiling (generous)
+    cpus: ${WEBAPP_CPUS:-4}                  # D1: CPU cap (generous)
     ports:
       - "${WEBAPP_PORT:-3000}:3000"
     environment:
