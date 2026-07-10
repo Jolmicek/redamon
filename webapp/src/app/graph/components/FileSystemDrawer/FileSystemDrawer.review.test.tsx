@@ -23,11 +23,35 @@ vi.mock('@/components/ui/Drawer', () => ({
   ),
 }))
 
+// Mock useAlertModal. The real hook requires <AlertProvider> in the tree
+// (mounted in app/layout.tsx in production). The component now uses these
+// modal-based alerts instead of window.alert/confirm, so tests assert on the
+// spies. vi.hoisted runs before the vi.mock factory so the refs are stable.
+const alertSpies = vi.hoisted(() => ({
+  alert: vi.fn(async () => {}),
+  alertError: vi.fn(async () => {}),
+  alertWarning: vi.fn(async () => {}),
+  confirm: vi.fn(async () => true),
+  dangerConfirm: vi.fn(async () => true),
+}))
+vi.mock('@/components/ui', async (orig) => {
+  const real = (await orig()) as Record<string, unknown>
+  return {
+    ...real,
+    useAlertModal: () => alertSpies,
+  }
+})
+
 interface FetchCall { url: string; init?: RequestInit }
 let fetchCalls: FetchCall[] = []
 let fetchHandler: (url: string, init?: RequestInit) => Promise<Response>
 
 beforeEach(() => {
+  alertSpies.alert.mockClear()
+  alertSpies.alertError.mockClear()
+  alertSpies.alertWarning.mockClear()
+  alertSpies.confirm.mockClear()
+  alertSpies.dangerConfirm.mockClear()
   fetchCalls = []
   fetchHandler = async (url) => {
     if (url.includes('/api/agent/workspace/list')) {
@@ -225,7 +249,6 @@ describe('FileSystemDrawer: modal UX', () => {
 
 describe('FileSystemDrawer: mkdir input validation', () => {
   test('slash in new folder name is rejected client-side', async () => {
-    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
     fetchHandler = async (url) => {
       if (url.includes('/api/agent/workspace/list')) {
         return new Response(JSON.stringify({ entries: sampleWithProtected }), { status: 200 })
@@ -240,14 +263,13 @@ describe('FileSystemDrawer: mkdir input validation', () => {
     fireEvent.change(input, { target: { value: 'evil/path' } })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    // Alert fires, NO mkdir POST
-    expect(alertSpy).toHaveBeenCalled()
+    // Alert fires (modal warning), NO mkdir POST
+    expect(alertSpies.alertWarning).toHaveBeenCalled()
     await new Promise((r) => setTimeout(r, 20))
     expect(fetchCalls.some(c => c.url.includes('/workspace/mkdir'))).toBe(false)
   })
 
   test('dot/dotdot names are rejected client-side', async () => {
-    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
     render(<FileSystemDrawer isOpen={true} onClose={() => {}} projectId="p1" />)
     await waitFor(() => expect(screen.getByText('notes')).toBeInTheDocument())
     fireEvent.click(screen.getByTitle('New folder in current directory'))
@@ -256,7 +278,7 @@ describe('FileSystemDrawer: mkdir input validation', () => {
       fireEvent.change(input, { target: { value: bad } })
       fireEvent.keyDown(input, { key: 'Enter' })
     }
-    expect(alertSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(alertSpies.alertWarning.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(fetchCalls.some(c => c.url.includes('/workspace/mkdir'))).toBe(false)
   })
 

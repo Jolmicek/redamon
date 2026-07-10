@@ -987,12 +987,12 @@ describe('buildTemplate — edge cases', () => {
   test('template rotation tools count matches TOOL_NAME_MAP', () => {
     const t = buildTemplate({}, {})
     const rotationTools = Object.keys(t.rotation).filter(k => !k.startsWith('_'))
-    expect(rotationTools.length).toBe(19)
+    expect(rotationTools.length).toBe(20)
   })
 
   test('template keys count matches UserSettings key fields', () => {
     const t = buildTemplate({}, {})
-    expect(Object.keys(t.keys).length).toBe(24)
+    expect(Object.keys(t.keys).length).toBe(25)
   })
 
   test('template tunneling count matches UserSettings tunnel fields', () => {

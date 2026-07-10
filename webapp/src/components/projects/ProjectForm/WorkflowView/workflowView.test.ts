@@ -245,22 +245,31 @@ describe('workflowLayout / computeLayout', () => {
 
     const inputX = posMap.get('input')!.x
     for (const p of positions) {
-      if (p.id !== 'input') {
-        expect(p.x, `${p.id} (x=${p.x}) is to the left of input (x=${inputX})`).toBeGreaterThanOrEqual(inputX)
-      }
+      if (p.id === 'input') continue
+      // Universal data nodes (Domain/Subdomain/IP) live in the input's own
+      // group-0 column and are horizontally centered over it, so with three
+      // of them they extend slightly left of the narrower, centered input
+      // node (see the three-band layout docstring). Exclude them; every other
+      // node sits in a later column to the right.
+      const nodeType = p.id.replace('data-', '')
+      if (UNIVERSAL_DATA_NODES.has(nodeType)) continue
+      expect(p.x, `${p.id} (x=${p.x}) is to the left of input (x=${inputX})`).toBeGreaterThanOrEqual(inputX)
     }
   })
 
-  test('universal data nodes are to the right of input', () => {
+  test('universal data nodes are in the leftmost column (left of all tools)', () => {
     const { nodes } = buildLayoutNodes()
     const positions = computeLayout(nodes)
     const posMap = new Map(positions.map(p => [p.id, p]))
 
-    const inputX = posMap.get('input')!.x
+    // Universal data nodes are the seed data: they belong to the leftmost
+    // (group 0) column, centered over the input node, so they sit to the left
+    // of every tool node.
+    const minToolX = Math.min(...WORKFLOW_TOOLS.map(t => posMap.get(`tool-${t.id}`)!.x))
     for (const nt of UNIVERSAL_DATA_NODES) {
       const dataX = posMap.get(`data-${nt}`)?.x
       if (dataX !== undefined) {
-        expect(dataX).toBeGreaterThan(inputX)
+        expect(dataX, `${nt} (x=${dataX}) should be left of all tools (minToolX=${minToolX})`).toBeLessThan(minToolX)
       }
     }
   })
@@ -479,7 +488,12 @@ describe('workflow graph logic', () => {
     test('Katana is chain-broken when BaseURL is starved', () => {
       const fields: Record<string, boolean> = {}
       for (const tool of WORKFLOW_TOOLS) fields[tool.enabledField] = false
-      fields['katanaEnabled'] = true
+      // Katana itself lists BaseURL as an output (crawlers discover further
+      // base URLs), so enabling Katana would self-satisfy its own BaseURL
+      // input. To genuinely starve BaseURL, keep Katana off and enable only a
+      // port scanner, which never produces BaseURL. Katana (a BaseURL consumer)
+      // is still flagged chain-broken.
+      fields['naabuEnabled'] = true
 
       const { toolBrokenInputs } = computeGraphState(fields)
       const broken = toolBrokenInputs.get('Katana') ?? []

@@ -379,7 +379,12 @@ export function useWebSocketHandler(deps: WebSocketHandlerDeps) {
           if (waveIndex !== -1) {
             const waveItem = prev[waveIndex] as PlanWaveItem
             let status: PlanWaveItem['status'] = 'success'
-            if (message.payload.failed === message.payload.total_steps) {
+            if (message.payload.total_steps === 0) {
+              // An empty plan (no steps) completed with nothing to fail: success,
+              // not error. Guard first so `failed === total_steps` (0 === 0) below
+              // does not misclassify it as 'error'.
+              status = 'success'
+            } else if (message.payload.failed === message.payload.total_steps) {
               status = 'error'
             } else if (message.payload.failed > 0) {
               status = 'partial'

@@ -39,8 +39,12 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
     expect(PRESET_EXCLUDED_FIELDS.has('jsReconUploadedFiles')).toBe(true)
   })
 
-  test('has exactly 10 excluded fields', () => {
-    expect(PRESET_EXCLUDED_FIELDS.size).toBe(10)
+  test('excludes per-project custom wordlists', () => {
+    expect(PRESET_EXCLUDED_FIELDS.has('vhostSniCustomWordlist')).toBe(true)
+  })
+
+  test('has exactly 11 excluded fields', () => {
+    expect(PRESET_EXCLUDED_FIELDS.size).toBe(11)
   })
 
   test('does NOT exclude recon settings fields', () => {
@@ -444,7 +448,10 @@ describe('preset roundtrip', () => {
     const parsed = JSON.parse(json)
     expect(parsed).toEqual(settings)
 
-    // Should have all non-excluded fields
-    expect(Object.keys(settings).length).toBe(Object.keys(formData).length - PRESET_EXCLUDED_FIELDS.size)
+    // Should have all non-excluded fields. Only subtract the excluded fields
+    // that actually appear in this fixture (it does not carry every excluded
+    // field, e.g. vhostSniCustomWordlist).
+    const excludedPresent = Object.keys(formData).filter(k => PRESET_EXCLUDED_FIELDS.has(k)).length
+    expect(Object.keys(settings).length).toBe(Object.keys(formData).length - excludedPresent)
   })
 })
