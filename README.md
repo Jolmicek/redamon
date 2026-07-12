@@ -178,7 +178,7 @@ At the end of the install (and on every `./redamon.sh up` or `./redamon.sh updat
 
 - **Admin name** -- display name shown in the UI (e.g. `Admin`, your name, anything you want).
 - **Admin email** -- used to log in at `http://localhost:3000/login`.
-- **Admin password** -- minimum 4 characters.
+- **Admin password** -- minimum 12 characters.
 
 After creation, open **http://localhost:3000** and sign in with the email and password you just set.
 

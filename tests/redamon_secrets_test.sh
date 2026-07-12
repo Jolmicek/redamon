@@ -62,9 +62,10 @@ unset -f docker; rm -rf "$TMP"
 # test_ensure_db_secrets_rotates_existing_volume (STRIDE S13)
 echo "== ensure_db_secrets: EXISTING volume on default -> rotate live DB + pin .env =="
 TMP=$(mktemp -d); SCRIPT_DIR="$TMP"; : > "$TMP/.env"
-# Stub: `docker volume inspect ...` -> exists (0); `docker exec ...` (the ALTER)
+# Stub: `docker volume inspect ...` -> exists (0); `docker ps` reports the DBs
+# RUNNING (so the S13 rotation pre-step no-ops); `docker exec ...` (the ALTER)
 # -> success (0). So rotation should ALTER then write the new strong value.
-docker() { case "${1:-}" in volume) return 0;; exec) return 0;; *) return 0;; esac; }
+docker() { case "${1:-}" in volume) return 0;; ps) printf 'redamon-postgres\nredamon-neo4j\n'; return 0;; exec) return 0;; *) return 0;; esac; }
 out="$(ensure_db_secrets 2>&1)"
 assert_true  "POSTGRES_PASSWORD rotated + pinned (48 hex)" "grep -qE '^POSTGRES_PASSWORD=[0-9a-f]{48}\$' '$TMP/.env'"
 assert_true  "NEO4J_PASSWORD rotated + pinned (48 hex)"    "grep -qE '^NEO4J_PASSWORD=[0-9a-f]{48}\$' '$TMP/.env'"
@@ -75,14 +76,30 @@ unset -f docker; rm -rf "$TMP"
 # test_ensure_db_secrets_failsafe_on_alter_error (STRIDE S13)
 echo "== ensure_db_secrets: EXISTING volume, ALTER fails -> fail-safe, no .env write =="
 TMP=$(mktemp -d); SCRIPT_DIR="$TMP"; : > "$TMP/.env"
-# Stub: volume exists (0) but the ALTER (docker exec) FAILS (1).
-docker() { case "${1:-}" in volume) return 0;; exec) return 1;; *) return 0;; esac; }
+# Stub: volume exists (0), DBs running (ps), but the ALTER (docker exec) FAILS (1).
+docker() { case "${1:-}" in volume) return 0;; ps) printf 'redamon-postgres\nredamon-neo4j\n'; return 0;; exec) return 1;; *) return 0;; esac; }
 before=$(md5sum "$TMP/.env" | awk '{print $1}')
 out="$(ensure_db_secrets 2>&1)"
 after=$(md5sum "$TMP/.env" | awk '{print $1}')
 assert_eq    ".env unchanged when ALTER fails (no split-brain)" "$before" "$after"
 assert_true  "warns rotation FAILED"        "echo \"\$out\" | grep -qi 'rotation FAILED'"
 assert_true  "warns fail-safe / manual"     "echo \"\$out\" | grep -qi 'fail-safe'"
+unset -f docker; rm -rf "$TMP"
+
+# test_ensure_db_secrets_starts_stopped_db_for_rotation (STRIDE S13 / GAP B)
+# The reboot->`up` and `down && update` path: default-cred volume exists but the
+# DB is DOWN. The pre-step must START it (compose up, on the old default) so the
+# ALTER can run, then pin the new value -- instead of failing on the fail-closed
+# ${VAR:?} interpolation.
+echo "== ensure_db_secrets: EXISTING volume, DB DOWN -> start it, then rotate =="
+TMP=$(mktemp -d); SCRIPT_DIR="$TMP"; : > "$TMP/.env"
+# Stub: volumes exist; `docker ps` returns NOTHING (DBs down); `docker compose up`
+# succeeds; `docker inspect` health -> healthy; `docker exec` (ALTER) -> success.
+docker() { case "${1:-}" in volume) return 0;; ps) return 0;; inspect) echo "healthy"; return 0;; compose) return 0;; exec) return 0;; *) return 0;; esac; }
+out="$(ensure_db_secrets 2>&1)"
+assert_true  "pre-step starts the stopped DB" "echo \"\$out\" | grep -qi 'Starting .* on current default creds'"
+assert_true  "POSTGRES_PASSWORD rotated after auto-start" "grep -qE '^POSTGRES_PASSWORD=[0-9a-f]{48}\$' '$TMP/.env'"
+assert_true  "NEO4J_PASSWORD rotated after auto-start"    "grep -qE '^NEO4J_PASSWORD=[0-9a-f]{48}\$' '$TMP/.env'"
 unset -f docker; rm -rf "$TMP"
 
 echo "== ensure_db_secrets: operator already pinned -> silent no-op =="

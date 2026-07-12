@@ -586,9 +586,58 @@ _rotate_neo4j_password() {
 # .env and the volume never disagree. If the ALTER fails we fall back to the old
 # warn-only behaviour (fail-safe: never a locked-out DB).
 # Uses url/shell-safe hex so DATABASE_URL and NEO4J_AUTH need no escaping.
+# S13: rotation ALTERs the LIVE DB, so the DB container must be RUNNING. On a
+# STOPPED default-cred stack (the reboot -> `up` path, or `down && update`) the DB
+# is down AND the fail-closed compose `${VAR:?}` refuses to start it because .env
+# has no password yet -- a chicken-and-egg that would abort `up`/`update`/`dev`
+# with a cryptic "required variable ... is missing a value". This brings the
+# needed DB(s) up with their OLD default creds (exported ONLY for this one call so
+# the `:?` interpolation resolves; an already-initialised volume ignores the
+# value), so the subsequent ALTER can run and ensure_db_secrets can pin the new
+# value. Best-effort: on any failure ensure_db_secrets falls back to warn-only.
+_start_dbs_for_rotation_if_needed() {
+    local env_file="$SCRIPT_DIR/.env"
+    local svcs=() need=false
+    if ! grep -q '^POSTGRES_PASSWORD=' "$env_file" 2>/dev/null \
+         && _data_volume_exists postgres_data \
+         && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^redamon-postgres$'; then
+        svcs+=(postgres); need=true
+    fi
+    if ! grep -q '^NEO4J_PASSWORD=' "$env_file" 2>/dev/null \
+         && _data_volume_exists neo4j_data \
+         && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^redamon-neo4j$'; then
+        svcs+=(neo4j); need=true
+    fi
+    [[ "$need" == false ]] && return 0
+
+    info "Starting ${svcs[*]} on current default creds so S13 can rotate the password..."
+    # compose interpolates the WHOLE file, so BOTH `:?` vars must resolve even to
+    # start one service; supply both defaults for this single command only. These
+    # match the compose defaults and the `specs` below; an init'd volume ignores
+    # them, so the container comes up on the volume's real (default) password.
+    if ! POSTGRES_PASSWORD=redamon_secret NEO4J_PASSWORD=changeme123 \
+            docker compose up -d "${svcs[@]}" >/dev/null 2>&1; then
+        warn "Could not start ${svcs[*]} for rotation; falling back to warn-only fail-safe."
+        return 0
+    fi
+    local c waited
+    for c in "${svcs[@]}"; do
+        waited=0
+        while [[ $waited -lt 60 ]]; do
+            [[ "$(docker inspect --format='{{.State.Health.Status}}' "redamon-$c" 2>/dev/null || echo x)" == "healthy" ]] && break
+            sleep 2; waited=$((waited + 2))
+        done
+    done
+}
+
 ensure_db_secrets() {
     local env_file="$SCRIPT_DIR/.env"
     touch "$env_file"
+
+    # If a default-cred volume needs rotating but its DB is down, bring it up
+    # first (see helper) so the live ALTER below can run. No-op on fresh installs
+    # (no volume) and on already-pinned / already-running stacks.
+    _start_dbs_for_rotation_if_needed
 
     # (var, volume suffix, compose default, rotate-fn) tuples.
     local specs=(
@@ -1064,7 +1113,13 @@ _kb_get_neo4j_count() {
         echo "0"
         return
     fi
-    local pass="${NEO4J_PASSWORD:-changeme123}"
+    # S13: after rotation the live password is in .env, NOT changeme123 and NOT in
+    # this shell's env (redamon.sh does not source .env). Read .env first so the
+    # `status` / `kb stats` KB count still authenticates on a rotated DB; fall back
+    # to the env var, then the fresh-install default.
+    local pass
+    pass="$(grep -E '^NEO4J_PASSWORD=' "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    pass="${pass:-${NEO4J_PASSWORD:-changeme123}}"
     local user="${NEO4J_USER:-neo4j}"
     local count
     count=$(docker exec redamon-neo4j cypher-shell \
