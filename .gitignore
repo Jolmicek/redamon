@@ -234,3 +234,6 @@ knowledge_base/data/
 
 # DevergoLabs
 DevergoLabs/
+
+# Deploy plan (local only)
+deploy/DEPLOY_PLAN_EC2.md

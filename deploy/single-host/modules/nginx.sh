@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# nginx.sh -- render the single-origin vhost from a template, install it, gate on
+# `nginx -t`, reload (§6). Requires _common.sh.
+#
+# Reads (exported by deploy.sh): ACCESS_MODE, SERVER_NAME, CSP_CONNECT, TLS_MODE,
+#   SSL_CERT_REMOTE, SSL_KEY_REMOTE, GATE_MODE, OPERATOR_ALLOW_CIDRS,
+#   BASIC_AUTH_USER, BASIC_AUTH_PASS.
+# Templates + snippet are SCP'd to /tmp/redamon-deploy/nginx/ by deploy.sh.
+
+NGINX_TMPL_DIR=/tmp/redamon-deploy/nginx
+NGINX_SITE=/etc/nginx/sites-available/redamon
+
+# Build the access-gate directive block from GATE_MODE.
+_gate_block() {
+  case "${GATE_MODE:-ip_allowlist}" in
+    ip_allowlist)
+      local cidr out=""
+      if [[ -z "${OPERATOR_ALLOW_CIDRS:-}" ]]; then
+        echo "    # ip_allowlist selected but OPERATOR_ALLOW_CIDRS empty -> allow all (check .env)"
+        return
+      fi
+      IFS=',' read -ra arr <<< "${OPERATOR_ALLOW_CIDRS}"
+      for cidr in "${arr[@]}"; do
+        cidr="$(echo "$cidr" | xargs)"; [[ -z "$cidr" ]] && continue
+        out+="    allow ${cidr};"$'\n'
+      done
+      out+="    deny all;"
+      printf '%s\n' "${out}"
+      ;;
+    basic_auth)
+      printf '%s\n' '    auth_basic "RedAmon";
+    auth_basic_user_file /etc/nginx/.redamon_htpasswd;'
+      ;;
+    none|*)
+      echo "    # access gate: none (relying on app login + cloud Security Group)"
+      ;;
+  esac
+}
+
+_acme_block() {
+  if [[ "${TLS_MODE:-}" == "letsencrypt" ]]; then
+    echo "    location /.well-known/acme-challenge/ { root /var/www/certbot; }"
+  else
+    echo ""
+  fi
+}
+
+_install_htpasswd() {
+  [[ "${GATE_MODE:-}" == "basic_auth" ]] || return 0
+  [[ -n "${BASIC_AUTH_USER:-}" && -n "${BASIC_AUTH_PASS:-}" ]] || { err "basic_auth needs BASIC_AUTH_USER/PASS"; return 1; }
+  local hash
+  hash=$(openssl passwd -apr1 "${BASIC_AUTH_PASS}")
+  printf '%s:%s\n' "${BASIC_AUTH_USER}" "${hash}" | run_sudo_tee /etc/nginx/.redamon_htpasswd
+  run_sudo chmod 640 /etc/nginx/.redamon_htpasswd
+}
+
+# Line-oriented render: single-line tokens via bash substitution; whole-line blocks
+# (__GATE__, __ACME_BLOCK__) replaced with their (possibly multi-line) content.
+_render_template() {
+  local tmpl="$1" gate acme line
+  gate="$(_gate_block)"
+  acme="$(_acme_block)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      *"# __GATE__"*)   printf '%s\n' "${gate}" ;;
+      "__ACME_BLOCK__") printf '%s\n' "${acme}" ;;
+      *Strict-Transport-Security*)
+        # HSTS is https-only and operator-toggleable via HSTS_ENABLE.
+        if is_true "${HSTS_ENABLE:-true}"; then printf '%s\n' "$line"; fi
+        ;;
+      *)
+        line="${line//__SERVER_NAME__/${SERVER_NAME}}"
+        line="${line//__SSL_CERT_REMOTE__/${SSL_CERT_REMOTE}}"
+        line="${line//__SSL_KEY_REMOTE__/${SSL_KEY_REMOTE}}"
+        line="${line//__CSP_CONNECT__/${CSP_CONNECT}}"
+        line="${line//__HTTP_PORT__/${HTTP_PORT:-80}}"
+        line="${line//__HTTPS_PORT__/${HTTPS_PORT:-443}}"
+        line="${line//__CSP_HEADER_NAME__/${CSP_HEADER_NAME}}"
+        line="${line//__WS_AUTH_REQUEST__/${WS_AUTH_REQUEST}}"
+        line="${line//__REDIRECT_HOST__/${REDIRECT_HOST}}"
+        printf '%s\n' "$line"
+        ;;
+    esac
+  done < "$tmpl"
+}
+
+_install_snippet() {
+  run_sudo mkdir -p /etc/nginx/snippets
+  run_sudo cp "${NGINX_TMPL_DIR}/snippets/security-headers.conf" /etc/nginx/snippets/redamon-security-headers.conf
+  run_sudo cp "${NGINX_TMPL_DIR}/snippets/proxy-common.conf" /etc/nginx/snippets/redamon-proxy-common.conf
+}
+
+# Choose template by ACCESS_MODE and install the site (does NOT reload -- caller gates).
+_write_site() {
+  local tmpl
+  case "${ACCESS_MODE:-https-domain}" in
+    https-*) tmpl="${NGINX_TMPL_DIR}/redamon.conf.tmpl" ;;
+    http-*)  tmpl="${NGINX_TMPL_DIR}/redamon-http.conf.tmpl" ;;
+    *) err "Unknown ACCESS_MODE: ${ACCESS_MODE}"; return 1 ;;
+  esac
+  [[ -f "$tmpl" ]] || { err "template not found: $tmpl"; return 1; }
+  # Derived render values (globals so _render_template sees them under bash dynamic scope).
+  CSP_HEADER_NAME="Content-Security-Policy-Report-Only"
+  is_true "${CSP_ENFORCE:-false}" && CSP_HEADER_NAME="Content-Security-Policy"
+  WS_AUTH_REQUEST=""
+  is_true "${WS_REQUIRE_SESSION:-true}" && WS_AUTH_REQUEST="auth_request /_redamon_session;"
+  case "${ACCESS_MODE:-https-domain}" in
+    *-domain) REDIRECT_HOST="${DOMAIN}" ;;
+    *)        REDIRECT_HOST='$host' ;;   # bare-IP: keep nginx $host (no canonical name)
+  esac
+  info "nginx: CSP=${CSP_HEADER_NAME}, WS session gate=$([ -n "$WS_AUTH_REQUEST" ] && echo on || echo off)"
+  _install_snippet
+  _install_htpasswd
+  _render_template "$tmpl" | run_sudo_tee "${NGINX_SITE}"
+  run_sudo rm -f /etc/nginx/sites-enabled/default
+  run_sudo ln -sf "${NGINX_SITE}" /etc/nginx/sites-enabled/redamon
+}
+
+_nginx_test_reload() {
+  if ! run_sudo nginx -t; then
+    err "nginx -t FAILED -- not reloading"
+    return 1
+  fi
+  run_sudo systemctl reload nginx || run_sudo systemctl restart nginx
+  success "nginx configuration valid and reloaded"
+}
+
+# --- letsencrypt phase A: a minimal HTTP server that serves the ACME webroot on 80,
+#     so certbot certonly --webroot can validate before we have a cert. ---
+nginx_install_acme_bootstrap() {
+  step "nginx: ACME bootstrap (port 80 webroot)"
+  run_sudo mkdir -p /var/www/certbot
+  _install_snippet
+  cat <<EOF | run_sudo_tee "${NGINX_SITE}"
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${SERVER_NAME};
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 200 'redamon acme bootstrap'; add_header Content-Type text/plain; }
+}
+EOF
+  run_sudo rm -f /etc/nginx/sites-enabled/default
+  run_sudo ln -sf "${NGINX_SITE}" /etc/nginx/sites-enabled/redamon
+  _nginx_test_reload
+}
+
+# --- render + install the real single-origin site, then gate + reload. ---
+nginx_render_and_install() {
+  step "nginx: render single-origin site (${ACCESS_MODE})"
+  _write_site
+  _nginx_test_reload
+}

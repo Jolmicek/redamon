@@ -1,0 +1,11 @@
+# Operator-local deploy config and secrets -- NEVER commit these.
+.env
+.env.*
+!.env.example
+
+# Provided-TLS material drop point.
+cert/*
+!cert/.gitkeep
+
+# The engineering blueprint stays local (it is the design doc, not an operator file).
+DEPLOY_PLAN_EC2.md

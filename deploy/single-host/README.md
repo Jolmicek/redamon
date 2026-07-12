@@ -1,0 +1,368 @@
+# RedAmon single-host deploy
+
+Provision and operate a full RedAmon instance on any Linux server (EC2, DigitalOcean,
+Hetzner, bare metal) from your laptop, given only its **IP + an SSH credential + a domain**.
+
+## What this is
+
+`deploy.sh` is a thin remote driver around RedAmon's own `redamon.sh` control script. It
+prepares a bare host, clones the repo onto it, drives `redamon.sh` over SSH, and wraps the
+whole thing in an internet-facing security layer that `redamon.sh` deliberately does not
+provide (RedAmon is designed local-only): nginx + TLS + firewall + host hardening.
+
+**The security promise: one public origin over HTTPS.** From the internet only the webapp
+UI (443, plus 80 for the ACME challenge and an HTTP->HTTPS redirect) is reachable. The agent
+API, MCP servers, databases, orchestrator, and the reverse-shell catcher stay bound to
+loopback. nginx proxies the webapp and (same-origin) exactly the four agent WebSocket paths;
+nothing else on the agent is exposed.
+
+### Quick start
+
+```bash
+cd deploy/single-host
+cp .env.example .env
+# edit .env: HOST_IP, DOMAIN, SSH_KEY_PATH, OPERATOR_ALLOW_CIDRS, LETSENCRYPT_EMAIL,
+#            ADMIN_NAME / ADMIN_EMAIL / ADMIN_PASSWORD
+./deploy.sh init
+```
+
+First build takes **30-60 minutes** (Kali + agent images). When it finishes, log in at
+`https://<your-domain>/` with the admin you set in `.env`.
+
+## Prerequisites
+
+**Local machine:** `bash`, `ssh`, `scp`, `curl`. Only for password auth you also need
+`sshpass` (`apt install sshpass` / `brew install hudochenkov/sshpass/sshpass`). Key auth is
+recommended and needs nothing extra.
+
+**The server:** a fresh Ubuntu 22.04/24.04 box. You install **nothing** on it by hand -
+`deploy.sh` detects and installs every prerequisite (Docker Engine + Compose v2, nginx,
+certbot, ufw, fail2ban, swap, ...) idempotently. See "How the host is bootstrapped" below.
+
+## Server sizing
+
+RedAmon is heavy. `redamon.sh` enforces a hard **8 GB** Docker-visible RAM floor at bring-up
+(effective ~7.5 GB after slack), aborting below it unless `REDAMON_SKIP_RAM_GATE=true`.
+
+| Profile | vCPU | RAM | Disk | Example | Notes |
+|---|---|---|---|---|---|
+| Bare minimum (core only, no GVM/KB) | 2 | 8 GB | 50 GB | t3.large | Passes the gate; slow/swappy. Keep swap on. |
+| Recommended (core + occasional scans) | 4 | 16 GB | 60-80 GB | m5.xlarge | Sane default. |
+| Full (GVM + KB + Ollama judge + parallel scans) | 8 | 32 GB | 100-120 GB | m5.2xlarge | Ollama alone needs ~5-6 GB while scanning. |
+
+Budget **60 GB disk minimum, 100 GB for the full profile** (kali-sandbox ~12-15 GB, agent
+image ~7-10 GB, plus feeds/models/DB data/build cache).
+
+## The `.env` reference (every variable)
+
+`cp .env.example .env`, then fill it in. Every key, grouped as in the file:
+
+### Connection (CLI positionals override these)
+| Key | Purpose | Local-only |
+|---|---|---|
+| `HOST_IP` | Public IP/DNS of the target. Required. | yes |
+| `REMOTE_USER` | SSH sudoer (default `ubuntu`). | yes |
+| `SSH_KEY_PATH` | Path to `.pem` key (recommended). `~` is expanded. | yes (never copied to host) |
+| `SSH_PASSWORD` | Password-auth fallback. Needs local `sshpass`. Discouraged. | yes |
+| `SSH_PORT` | SSH port (default 22). Also drives the host ufw SSH-allow rule and the fail2ban `[sshd]` jail, so set it to the port the host's sshd actually listens on. | no (shipped to host) |
+
+### Repo
+| Key | Purpose |
+|---|---|
+| `REPO_URL` | Public clone URL. No token needed. |
+| `REPO_BRANCH` | Branch to deploy (default `master`). |
+| `APP_DIR` | Checkout dir name. Keep stable - it fixes `COMPOSE_PROJECT_NAME`, which redamon.sh uses for DB-volume detection. Do not change between init and update. |
+| `REDAMON_VERSION` | Optional version stamp baked into images. Blank -> redamon.sh default. |
+
+### Access mode
+| Key | Purpose |
+|---|---|
+| `ACCESS_MODE` | `https-domain` (default) \| `https-ip` \| `http-domain` \| `http-ip`. See "Access modes" below. |
+| `DOMAIN` | Required for `*-domain` modes; ignored for `*-ip`. |
+| `HTTP_PORT` / `HTTPS_PORT` | Ports nginx listens on (and ufw opens). Default 80/443. Keep `HTTP_PORT=80` if using Let's Encrypt (http-01 always validates on 80). Change only when fronted by another LB/proxy that presents 80/443 to clients. |
+
+### TLS (https-* only)
+| Key | Purpose |
+|---|---|
+| `TLS_MODE` | `letsencrypt` (domain only) \| `provided` \| `self-signed` (ip only). |
+| `LETSENCRYPT_EMAIL` | Required for letsencrypt. |
+| `LETSENCRYPT_STAGING` | `true` issues against LE staging (not browser-trusted) while testing, to avoid the 5-certs/week rate limit. |
+| `SSL_CERT_LOCAL` / `SSL_KEY_LOCAL` | `provided` mode: local paths (relative to this dir) SCP'd to the host. Drop files in `cert/`. |
+| `SSL_KEY_PASSWORD` | Passphrase if the provided key is encrypted. |
+| `HSTS_ENABLE` | Emit HSTS on https (default true). Auto-absent for http-*. |
+
+### Access control / hardening
+| Key | Purpose |
+|---|---|
+| `OPERATOR_ALLOW_CIDRS` | Comma list. nginx allow-gate + ufw 443 source. Strongly recommended. |
+| `SSH_ALLOW_CIDRS` | Comma list for ufw :22. Blank -> falls back to `OPERATOR_ALLOW_CIDRS`. |
+| `GATE_MODE` | `ip_allowlist` (recommended) \| `basic_auth` \| `none`. |
+| `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | Required for `basic_auth`. |
+| `WS_REQUIRE_SESSION` | Default `true`. nginx `auth_request` requires a valid webapp session cookie before ANY `/ws/*` upgrade. Keep it on: three of the four agent WS paths are unauthenticated (one is a root PTY) and `/ws/agent`'s ticket check fails open, so this is the real authentication layer in front of them. |
+| `CSP_ENFORCE` | Default `false` (Content-Security-Policy-Report-Only). Set `true` to enforce the CSP after confirming the WebGL graph and xterm terminal still render. |
+| `ENABLE_UFW` | Host firewall (default true). |
+| `ENABLE_SSH_HARDENING` | Key-only + no-root login. Skips disabling password login if you deployed over a password (so you don't lock yourself out). |
+| `ENABLE_FAIL2BAN` | sshd + nginx jails. |
+| `ENABLE_UNATTENDED_UPGRADES` | Auto security patches. |
+
+### Feature flags (map to redamon.sh)
+| Key | Maps to | Notes |
+|---|---|---|
+| `ENABLE_GVM` | `--gvm` | Heavy; 10-20 min feed sync; the deploy rotates GVM's `admin/admin`. |
+| `ENABLE_KB` | `--kbase` | Bakes ML embedding models (+~4.4 GB image). The real KB switch. |
+| `ENABLE_KB_REFRESH` | kb-refresh sidecar | |
+| `ENABLE_ZRAM` | `REDAMON_ENABLE_ZRAM=1` | Compressed-RAM cushion. |
+
+`SKIP_KB` is intentionally **not** an input: redamon.sh derives it from the `.kbase-enabled`
+flag it manages. Control KB with `ENABLE_KB` only.
+
+### Resources / tuning
+| Key | Purpose |
+|---|---|
+| `SWAP_SIZE_GB` | Swapfile size when host RAM < 16 GB. `0` skips. |
+| `REDAMON_SKIP_RAM_GATE` | `true` bypasses the 8 GB floor on tiny boxes (risky). |
+| `REDAMON_BUILD_PARALLEL` | Cap concurrent image builds. Blank -> redamon.sh auto-sizes. |
+| `DOCKER_DNS` | e.g. `8.8.8.8,8.8.4.4` merged into `/etc/docker/daemon.json` if container DNS breaks. |
+
+### Engagement knobs
+| Key | Purpose |
+|---|---|
+| `REVSHELL_TARGET_CIDRS` | Scopes the ufw 4444 rule to your RoE targets. 4444 is loopback-bound by default; see the Security posture section for how to actually catch reverse shells (tunnel, or republish + DOCKER-USER rule). |
+| `TUNNELS_ENABLED` | Keep `false` on an internet-exposed host. |
+
+### First admin (required for init)
+| Key | Purpose |
+|---|---|
+| `ADMIN_NAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | The first admin user, created automatically during `init`. There is **no** app-layer login lockout, so use a strong password (nginx `limit_req` is the only brute-force brake). |
+
+### Optional app config (appended to the server .env)
+| Key | Purpose |
+|---|---|
+| `NVD_API_KEY` | Faster NVD lookups. |
+| `KB_EMBEDDING_USE_API` / `KB_EMBEDDING_API_BASE_URL` / `KB_EMBEDDING_API_KEY` | Use a remote embedding API instead of the baked local model. |
+
+LLM provider keys are configured in the UI, not here.
+
+### Behaviour / safety
+| Key | Purpose |
+|---|---|
+| `INIT_FORCE` | `true` skips the typed `INIT` wipe confirmation (CI only - dangerous). |
+| `BACKUP_BEFORE_UPDATE` | Reserved (pre-update DB snapshot). |
+| `DRY_RUN` | Print the resolved plan and exit without touching the host. |
+| `VERBOSE` | Stream full remote output. |
+| `ALLOW_INSECURE` | Must be `1` to permit http-* modes. |
+
+## Access modes
+
+| Pick | When |
+|---|---|
+| `https-domain` | You have a real DNS name pointing at the host. The default and recommended. Use `TLS_MODE=letsencrypt`. |
+| `https-ip` | Bare IP, no DNS, but you still want TLS. `TLS_MODE=self-signed` (browser warning) or `provided`. |
+| `http-domain` / `http-ip` | Lab/test only. No TLS. Gated behind `ALLOW_INSECURE=1` and a loud banner - they invert the whole security posture (plaintext cookies/creds, no HSTS, agent WS unencrypted). |
+
+Derived automatically from `ACCESS_MODE` (you never set these):
+
+| ACCESS_MODE | Public host | nginx | WS scheme | Secure cookie / HSTS |
+|---|---|---|---|---|
+| `https-domain` | `$DOMAIN` | 443 + 80->443 | `wss://$DOMAIN/ws/...` | on |
+| `https-ip` | `$HOST_IP` | 443 + 80->443 | `wss://$HOST_IP/ws/...` | on (self-signed warning) |
+| `http-domain` | `$DOMAIN` | 80 only | `ws://$DOMAIN/ws/...` | off |
+| `http-ip` | `$HOST_IP` | 80 only | `ws://$HOST_IP/ws/...` | off |
+
+The agent WebSocket URL is **baked into the webapp image at build time**
+(`NEXT_PUBLIC_AGENT_WS_URL`). Changing the scheme or host later requires a webapp rebuild
+(re-run `update`), not just an nginx reload.
+
+## TLS setup
+
+- **letsencrypt** (recommended, `https-domain`): needs `DOMAIN` resolving to the host and
+  port 80 reachable. The deploy stands up an ACME webroot on 80, runs `certbot certonly
+  --webroot`, then installs the hardened 443 vhost pointing at
+  `/etc/letsencrypt/live/$DOMAIN/`. Auto-renew is wired via certbot's timer + an nginx reload
+  hook. Set `LETSENCRYPT_STAGING=true` while testing.
+- **provided** (`https-domain` or `https-ip`): drop `fullchain.pem` + `privkey.pem` in
+  `cert/` (or point `SSL_CERT_LOCAL`/`SSL_KEY_LOCAL` at them). They are SCP'd to
+  `/etc/ssl/redamon/` (key `600`), md5-idempotent. The only way to a trusted cert on a bare IP.
+- **self-signed** (`https-ip` escape hatch): generated on the host with the IP in a SAN.
+  Browser warning expected. Not for production.
+- **No TLS** (`http-*`): certbot is skipped entirely.
+
+## Commands
+
+| Command | What it does | Destructive |
+|---|---|---|
+| `./deploy.sh init` | Wipe ALL Docker state + the checkout, then build from zero. Auto-creates the first admin from `.env`. | **yes** (typed `INIT` confirm) |
+| `./deploy.sh update` | Pull latest `REPO_BRANCH` HEAD and apply (diff-driven rebuild via redamon.sh). Preserves all volumes/data. | no |
+| `./deploy.sh status` | redamon.sh status + `docker compose ps` + ufw + nginx -t + cert expiry. | no |
+| `./deploy.sh harden` | Re-apply host hardening + nginx/TLS only (idempotent), no rebuild. | no |
+| `./deploy.sh ssl-renew` | Renew (certbot) or re-install (provided) the cert + reload nginx. | no |
+| `./deploy.sh down` | Stop the stack, keep volumes/images. | no |
+| `./deploy.sh logs [service]` | Tail `docker compose logs -f` for a service (default `agent`). | no |
+| `./deploy.sh revshell-open` | Per-engagement: expose `4444` to `REVSHELL_TARGET_CIDRS` via a host socat forwarder (fails closed on reboot). | no |
+| `./deploy.sh revshell-close` | Tear the `4444` forwarder down and remove its ufw rules. | no |
+
+Connection fields can be overridden positionally, e.g.
+`./deploy.sh init 1.2.3.4 ~/.ssh/redamon.pem ubuntu`. Use `--env NAME` to select
+`.env.NAME` for per-instance configs (`prod`, `staging`, a client name).
+
+## Security posture
+
+RedAmon's threat model assumes a local-only deployment with no anonymous internet attacker.
+Putting it on a public IP invalidates that, so the deploy closes the gap:
+
+- The agent REST API is almost entirely **unauthenticated** (`/graph/exec`, `/emergency-stop-all`,
+  the whole `/workspace/*` family, `/sessions/*`, `/files`, FastAPI `/docs` + `/openapi.json`),
+  and three of the four WS paths are unauthenticated - `/ws/kali-terminal` is an anonymous
+  **root PTY**, and the two cypherfix sockets clone repos / edit code. `/ws/agent`'s ticket
+  check fails **open** if its secret is unset. So the deploy treats the agent as fully
+  untrusted from the edge:
+  - nginx proxies **only** the four `/ws/*` paths to the agent - never any agent REST route.
+  - **`auth_request` (WS_REQUIRE_SESSION=true)** makes nginx validate the webapp session
+    cookie against `/api/auth/me` before allowing any WS upgrade, so those unauthenticated
+    agent sockets require a logged-in user - not just a network position.
+  - the operator **IP allowlist / basic-auth gate** sits in front of everything.
+- The webapp trusts `X-Internal-Key` as a service-to-service **auth bypass** and injects
+  `X-User-Id` / `X-User-Role` downstream after auth. nginx **strips these inbound headers** on
+  every request (plus `X-Powered-By`) so a client can never spoof identity or bypass auth.
+- There is **no login rate-limit or lockout** in the app. nginx supplies `limit_req` on
+  `/api/auth/login` (5r/m) and a general `/api/` limit (30r/s), a per-IP connection cap, and
+  slowloris timeouts.
+- **Headers:** the webapp sets none of its own, so nginx is authoritative - HSTS, a tightened
+  CSP (no `unsafe-eval`; `object-src 'none'`; `base-uri`/`form-action 'self'`), `X-Frame-Options
+  DENY`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and COOP/CORP.
+- **TLS:** TLS 1.2/1.3 only, modern ECDHE ciphers, `ssl_session_tickets off`, OCSP stapling.
+- Every secret must be strong: the deploy runs a **secrets gate** that fails the build on any
+  unset/default/short secret (`changeme`, `redamon_secret`, ...). redamon.sh generates them;
+  the deploy only verifies.
+- `ip_allowlist` (default `GATE_MODE`) is strongly recommended given the unauthenticated
+  agent WS + root PTY - even though the app has its own login.
+- **Reverse shell (4444)** is bound to loopback by the prod overlay and closed at the
+  firewall. To catch a *direct* reverse shell during an engagement, set
+  `REVSHELL_TARGET_CIDRS` to your RoE target scope and run `./deploy.sh revshell-open`; run
+  `./deploy.sh revshell-close` the moment you are done. How it works: `revshell-open` starts a
+  transient `socat` forwarder on the host's public IP (`<public-ip>:4444 -> 127.0.0.1:4444`)
+  and opens `4444` in ufw to your target CIDRs only. Because `socat` is a **host** listener
+  (not a Docker-published port), ufw's source scoping actually applies - a plain ufw rule on
+  a Docker-published port would be bypassed by Docker's own iptables chains. A host **reboot
+  drops the forwarder**, so 4444 fails closed. The msf handler on 4444 is unauthenticated, so
+  it is exposed only to `REVSHELL_TARGET_CIDRS`, never the world; set your payload's LHOST to
+  the host's public IP and start the msf handler in RedAmon. (Alternative: a tunnel
+  ngrok/chisel to `127.0.0.1:4444` with `TUNNELS_ENABLED=true`; never run a world-open 4444
+  and a tunnel at once.)
+- If `ENABLE_GVM=true`, the deploy rotates GVM's default `admin/admin` and prints the new
+  password once.
+
+### Cloud firewall / Security Group
+
+`deploy.sh` configures the host `ufw`, but on a cloud host your **provider firewall (AWS
+Security Group / GCP firewall / Azure NSG) is the reliable outer boundary** — Docker's own
+iptables chains can bypass `ufw`, so the cloud firewall is what still protects you if a
+loopback re-bind is ever wrong (e.g. a stray `docker compose up` that republishes
+`3000`/`8090`/`4444` on `0.0.0.0`). Open **only**:
+
+| Port | Source | Purpose |
+|---|---|---|
+| **443/tcp** | your `OPERATOR_ALLOW_CIDRS` (or `0.0.0.0/0` if you rely on the nginx gate) | the app (HTTPS) |
+| **80/tcp** | `0.0.0.0/0` | Let's Encrypt ACME challenge + redirect to 443 (required for `TLS_MODE=letsencrypt`) |
+| **22/tcp** | your IP only | SSH management |
+
+**Open nothing else.** In particular do **not** open `8090` (agent), `3000` (webapp),
+`5432`/`7687`/`7474` (PostgreSQL/Neo4j), or `8000-8016`/`4444`/`8015` (Kali MCP / progress /
+tunnel manager / PTY / reverse-shell) — all are loopback-bound and reached only through nginx
+on `443`. Opening `8090` would expose the agent's unauthenticated WebSockets (including the
+anonymous **root PTY** `/ws/kali-terminal`) and its REST surface directly, bypassing nginx and
+its session gate. The browser reaches the agent's WebSockets at `wss://<domain>/ws/…` on `443`
+(nginx → `127.0.0.1:8090`), so `8090` never needs to be publicly reachable.
+
+> **nginx runs on the host, not in a container.** It sits **only at the edge** (80/443),
+> reverse-proxying to two loopback backends — the **webapp** (`127.0.0.1:3000`, for `/` and
+> `/api/*`) and the **agent** (`127.0.0.1:8090`, for the four `/ws/*` paths only). It is **not**
+> a middlebox between containers: all internal service-to-service traffic (webapp ↔ agent ↔
+> orchestrator ↔ DBs ↔ Kali) flows directly over the Docker bridge networks and never passes
+> through nginx.
+
+## First-run walkthrough
+
+1. `cp .env.example .env`; set `HOST_IP`, `DOMAIN`, `SSH_KEY_PATH`, `OPERATOR_ALLOW_CIDRS`,
+   `LETSENCRYPT_EMAIL`, and `ADMIN_NAME`/`ADMIN_EMAIL`/`ADMIN_PASSWORD`. Point `DOMAIN`'s
+   A-record at `HOST_IP` first (letsencrypt needs it).
+2. `./deploy.sh init` -> type `INIT` to confirm the wipe.
+3. Watch: teardown -> host bootstrap -> hardening -> clone + patches -> `redamon.sh install`
+   (30-60 min build) -> secrets gate -> admin bootstrap -> nginx + TLS -> verify.
+4. Verification asserts loopback binds (3000/8090 on 127.0.0.1 only), datastores never
+   off-loopback, container health, an admin exists, and `https://<domain>/api/health` -> 200.
+5. Log in at `https://<domain>/`.
+
+`DRY_RUN=true ./deploy.sh init` prints the resolved plan without touching the host.
+
+## How the host is bootstrapped
+
+`init` (and `harden`) run a dynamic detect-and-install matrix - each item is probed and
+installed only if missing or too old, idempotently: base apt packages (git, openssl, curl,
+jq, expect, ...), **Docker Engine + Compose v2 from Docker's official repo** (purging any old
+`docker.io`/v1 compose first), the docker service + group membership, nginx, certbot (only
+when letsencrypt is used), ufw, fail2ban, unattended-upgrades, an 8 GB swapfile on < 16 GB
+hosts, optional Docker DNS, and inotify limits. Nothing is assumed pre-present.
+
+## Update and rollback
+
+`update` is a thin wrapper around `redamon.sh update`: it restores the deploy-time patched
+files so the tree is fast-forwardable, runs `git pull --ff-only` + diff-driven selective
+rebuild + secret regen (all via redamon.sh, which preserves DB passwords by volume detection),
+then re-applies the patches AND rebuilds the webapp image so the baked single-origin WS URL
+and Secure-cookie change survive the update (redamon.sh would otherwise rebuild webapp from
+the reset, unpatched tree). Finally it re-renders nginx. **All engagement data (Postgres,
+Neo4j, reports, GVM feeds, models) lives in named volumes that survive `update`.**
+
+The deploy applies three app-code changes on the host checkout at deploy time (they are not
+committed to the app source): the `webapp/Dockerfile` `NEXT_PUBLIC_AGENT_WS_URL` build arg,
+the cypherfix WS-origin fix, and the Secure-cookie flip (https only). They live in `patches/`.
+The prod compose overlay and these patches are SCP'd to the host and copied into the checkout
+by `deploy.sh`, so the deploy works even if `deploy/single-host/` is not committed to the
+cloned branch (committing it is still fine and makes the overlay part of the repo history).
+
+Rollback is manual: `git reset --hard <prev>` on the host checkout, then `./deploy.sh update`.
+
+## Troubleshooting and FAQ
+
+- **RAM gate abort** ("need ~8 GB"): provision more RAM, or set `REDAMON_SKIP_RAM_GATE=true`
+  (risky) and keep `SWAP_SIZE_GB` on.
+- **certbot fails**: `DOMAIN` must resolve to the host and port 80 must be reachable (open it
+  in your cloud Security Group / `OPERATOR_ALLOW_CIDRS` must not block the ACME check - LE
+  validates from arbitrary IPs, so 80 must be world-open). Use `LETSENCRYPT_STAGING=true` to
+  iterate without burning the rate limit.
+- **Secrets-gate failure**: a secret is unset/default/short. redamon.sh should have generated
+  them; check the server `~/<APP_DIR>/.env`.
+- **GVM feed-sync wait**: with `ENABLE_GVM=true`, scans don't work until feeds finish syncing
+  (10-20 min after first boot).
+- **Never run raw `docker compose up` on the host.** The loopback re-binds hold only while
+  the prod overlay is active (`COMPOSE_FILE`). A bare `docker compose up` reloads the base
+  file and republishes 3000/8090/4444 on 0.0.0.0 and starts the profile-less GVM stack.
+  Always go through `redamon.sh` (which the deploy points at the overlay). `redamon.sh up dev`
+  is likewise forbidden here (it hardcodes its own compose files and defeats the overlay).
+- **Locked out over SSH**: if you deployed over a password, `ENABLE_SSH_HARDENING` will not
+  disable password login. Install a key, then re-run `harden` with key auth to close it.
+
+## The redamon.sh parameter surface
+
+`deploy.sh` never edits `redamon.sh`. It drives it through four channels: the subcommand
+(`MODE`), CLI flags on `install`, exported env vars, and keys appended to the server-side
+application `.env`.
+
+| `.env` key | Drives |
+|---|---|
+| `ENABLE_GVM` | `install --gvm` |
+| `ENABLE_KB` | `install --kbase` |
+| `ENABLE_ZRAM` | `REDAMON_ENABLE_ZRAM=1` |
+| `REDAMON_BUILD_PARALLEL` | `REDAMON_BUILD_PARALLEL` (blank -> auto) |
+| `REDAMON_SKIP_RAM_GATE` | `REDAMON_SKIP_RAM_GATE=1` |
+| `REDAMON_VERSION` | image build-arg stamp |
+| (fixed) | `COMPOSE_FILE` = base + prod overlay, made sticky |
+| `APP_DIR` | `COMPOSE_PROJECT_NAME` (do not change between init/update) |
+| `ADMIN_*` | first-admin creation on init |
+| `NVD_API_KEY`, `KB_EMBEDDING_*`, `TUNNELS_ENABLED` | appended to the server `.env` |
+
+Intentionally hands-off (redamon.sh owns these; the deploy only verifies): `AUTH_SECRET`,
+`INTERNAL_API_KEY`, `SCANNER_API_KEY`, `ORCHESTRATOR_API_KEY`, `MCP_AUTH_TOKEN`,
+`AGENT_WS_TICKET_SECRET`, `TUNNEL_AUTH_TOKEN`, `POSTGRES_PASSWORD`, `NEO4J_PASSWORD`, and
+`SKIP_KB` (derived from the `.kbase-enabled` flag).

@@ -120,6 +120,19 @@ This project stores user-provided API keys and credentials for integration with 
 - **API key rotation**: Users should regularly rotate all configured API keys and revoke them immediately after engagements conclude
 - **Database backups**: If you create database backups, ensure they are encrypted and stored securely, as they will contain all plaintext credentials
 
+### Self-Hosted Deployment and Internet-Facing Instances
+
+This repository includes deployment tooling and documentation (see the **`deploy/`** directory) for provisioning a RedAmon instance on a remote Linux server (EC2 or any VPS). This tooling is provided **strictly to help an operator self-host a single instance for their own authorized use.** By deploying RedAmon with it, you acknowledge and agree that:
+
+- **Single-operator self-hosting only, not a service**: The deployment tooling is intended for standing up **your own private instance**. It is **NOT** a means to offer RedAmon as a hosted, multi-tenant, or "attack-as-a-service" offering to third parties. Operating RedAmon as a service through which others conduct security testing is outside the intended, supported, and licensed use of this tool, and may carry additional legal obligations and liability that you assume entirely
+- **Deployment grants no authorization**: Standing up a RedAmon instance — publicly reachable or otherwise — **does not grant you authorization to scan, probe, or attack anything.** Every engagement still requires explicit, written authorization from the target's owner, exactly as described throughout this disclaimer
+- **An exposed instance is itself a high-value target**: A deployed RedAmon instance stores API keys and custom HTTP headers **in plaintext** (see *Credential and API Key Storage*), along with reconnaissance data, exploitation results, discovered secrets, and reverse-shell/listener configuration. If compromised, an attacker gains not only this sensitive data but a pre-armed offensive toolkit. **Securing the deployed host is your sole responsibility**
+- **Minimum hardening expectations**: If you expose the instance to the internet, you are responsible for, at minimum: a **strong, unique administrator credential** (never a default or weak password on a public origin), TLS on the single public origin, keeping all other services (agent API, databases, MCP servers, orchestrator, reverse-shell catcher) bound to loopback and not published, host firewalling, prompt patching, and access logging. The `deploy/` tooling aims to establish this baseline, but you must verify and maintain it
+- **Safety defaults must remain enabled**: The deployment tooling does **not** disable RedAmon's safety controls, and you should not either. **Approval gates, Rules of Engagement (RoE), and the Target Guardrail must remain enabled** on any deployed instance. Disabling them on an internet-reachable, autonomous offensive system materially increases the risk of unintended, unauthorized, or out-of-scope actions (see *Autonomous AI Agent — Unintended Effects*)
+- **You become the host operator**: Once deployed, you are the operator of the host and are responsible for its security, its lawful operation, its data retention, and compliance with the laws of the jurisdiction in which it is hosted and from which it is operated. Cloud providers' acceptable-use policies also apply to **your** instance, not only to targets
+- **Non-commercial exemptions depend on how you deploy**: The open-source and research exemptions this project relies on (see *AI Regulation and EU AI Act*) depend on non-commercial, research-oriented use. Deploying RedAmon in a commercial, hosted, or otherwise regulated capacity shifts provider/deployer obligations onto you and may remove those exemptions
+- **No warranty for RedAmon's own security defects; internet exposure is at your own risk**: RedAmon is provided "AS IS" with **no warranty of any kind** (see the *MIT License* and *Disclaimer of Liability*), and this expressly extends to **security defects, bugs, or vulnerabilities in RedAmon's own code** (webapp, agent, orchestrator, MCP servers, and bundled components). RedAmon is **designed local-only**; exposing an instance to the public internet is a deliberate choice you make, and you accept that such an instance may be compromised — including through undiscovered vulnerabilities in RedAmon itself — with any resulting damage, data loss, credential exposure, or downstream harm to you or to third parties being **your sole responsibility**. To the maximum extent permitted by applicable law, the authors and contributors accept **no liability** for any consequence arising from a defect in this software, whether the instance is run locally or exposed to the internet. This allocation of risk does not purport to exclude liability that cannot be excluded by law (e.g., liability for willful misconduct or gross negligence). If you discover such a vulnerability, report it privately and do not exploit it, per **[SECURITY.md](SECURITY.md)**
+
 ### Responsible Disclosure
 
 If you discover vulnerabilities:
@@ -206,24 +219,7 @@ The techniques demonstrated are already publicly known and documented. This tool
 
 ### Third-Party Security Tools and Licenses
 
-RedAmon integrates, bundles, or invokes the following third-party open-source tools. Each tool is governed by its own license and terms. **The authors of RedAmon do not own, maintain, or provide warranty for any of these tools.** Users must independently comply with each tool's license:
-
-| Tool | Purpose | License |
-|------|---------|---------|
-| Naabu | Port scanning | AGPL-3.0 (ProjectDiscovery) |
-| Nuclei | Vulnerability scanning (template-based) | AGPL-3.0 (ProjectDiscovery) |
-| Katana | Web crawling and endpoint discovery | AGPL-3.0 (ProjectDiscovery) |
-| HTTPx | HTTP probing and technology detection | AGPL-3.0 (ProjectDiscovery) |
-| GAU (GetAllUrls) | Passive URL discovery from web archives | MIT |
-| Kiterunner | API endpoint discovery | Open Source |
-| Knockpy | Subdomain enumeration | Open Source |
-| Wappalyzer | Technology fingerprinting | GPL-3.0 |
-| Metasploit Framework | Exploitation and post-exploitation | BSL-2.0 (Rapid7) |
-| GVM/OpenVAS | Network vulnerability assessment | AGPL-3.0 (Greenbone) |
-| Nmap | Network scanning and service detection | GPL |
-| Tor / Proxychains | Anonymous network routing (optional) | BSD / LGPL-2.1+ |
-| Neo4j Community | Graph database for recon data | Neo4j Community License |
-| PostgreSQL | Relational database | PostgreSQL License (BSD-like) |
+RedAmon integrates, bundles, or invokes numerous third-party open-source tools (port scanners, vulnerability scanners, exploitation frameworks, databases, and more). Each tool is governed by its own license and terms. **The authors of RedAmon do not own, maintain, or provide warranty for any of these tools.** Users must independently comply with each tool's license. The complete, authoritative list of bundled tools, their purposes, their licenses, and their upstream source-code locations is maintained in **[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)**.
 
 - **No warranty on third-party behavior**: The authors make no guarantees about the accuracy, reliability, or safety of any third-party tool's output
 - **License compliance**: Some tools use **AGPL-3.0** or **GPL** licenses, which impose specific obligations on distribution and modification. Users must review and comply with each license independently
@@ -238,7 +234,7 @@ This project is a **non-commercial, open-source research project** intended to e
 - **Scientific Research Exemption (Article 2(6))**: Additionally, AI systems developed and put into service for the sole purpose of scientific research and development are generally exempt from the heaviest regulatory requirements
 - **Transparency (Article 50)**: This tool integrates third-party Large Language Models (LLMs) that autonomously generate security analysis, tool selection decisions, and attack strategies. All AI-generated outputs should be treated as machine-generated content. The AI agent's decisions are not human decisions — users must exercise independent judgment before acting on any AI-generated recommendation
 - **Non-Commercial/Research Use**: This tool is not intended for commercial deployment or "High-Risk" use cases as defined by the EU AI Act
-- **No Built-in Governance Framework**: This project does not include a built-in governance or compliance framework. Users are strongly encouraged to run this tool in **isolated, self-hosted environments** to ensure data sovereignty and compliance with local laws (e.g., GDPR, national cybersecurity regulations)
+- **No Built-in Governance Framework**: This project does not include a built-in governance or compliance framework. By default RedAmon is designed to run **local-only** (single host, single operator, not exposed to the public internet). Users are strongly encouraged to keep it in **isolated, self-hosted environments** to ensure data sovereignty and compliance with local laws (e.g., GDPR, national cybersecurity regulations). The optional deployment tooling in `deploy/` supports internet-facing self-hosting as a **deliberate, hardened exception** to this default — it is single-operator self-hosting behind a TLS reverse proxy and firewall, not a commercial or multi-tenant service (see *Self-Hosted Deployment and Internet-Facing Instances*)
 - **User-Managed Compliance**: If deploying in any capacity beyond personal research, the user is solely responsible for implementing appropriate governance, logging, and oversight mechanisms. Deployers who use this tool in a high-risk context (Annex III) assume full provider/deployer obligations under the EU AI Act
 - **Liability Shift**: The authors of this open-source project bear no provider obligations under the EU AI Act. Any entity deploying this software commercially or in a regulated context assumes all applicable legal obligations as the provider or deployer under the Act
 
@@ -267,4 +263,4 @@ For questions about authorized use or licensing, please open an issue on the rep
 
 ---
 
-*Last updated: February 2026*
+*Last updated: July 2026*
