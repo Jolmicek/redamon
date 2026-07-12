@@ -101,6 +101,19 @@ describe('POST /api/auth/login', () => {
     expect(lock).toBeDefined()
   })
 
+  test('S12: cookie is Secure only over https', async () => {
+    mockUserFindUnique.mockResolvedValue({ id: 'u1', name: 'U', email: 'u@x.com', password: '$2b$10$x', role: 'user' })
+    mockVerifyPassword.mockResolvedValue(true)
+    vi.stubEnv('NODE_ENV', 'production')
+    // https -> Secure
+    const httpsRes = await POST(req({ email: 'u@x.com', password: 'p' }, { 'x-forwarded-proto': 'https' }))
+    expect(httpsRes.headers.get('set-cookie') || '').toMatch(/Secure/i)
+    // plain http -> not Secure (local login must keep working)
+    __resetThrottle()
+    const httpRes = await POST(req({ email: 'u@x.com', password: 'p' }))
+    expect(httpRes.headers.get('set-cookie') || '').not.toMatch(/Secure/i)
+  })
+
   test('S11: a successful login clears the counter', async () => {
     // 2 failures, then success clears, so subsequent failures start fresh.
     mockUserFindUnique.mockResolvedValueOnce(null)

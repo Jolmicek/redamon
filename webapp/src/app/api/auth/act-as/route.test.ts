@@ -101,13 +101,13 @@ describe('POST /api/auth/act-as', () => {
 describe('DELETE /api/auth/act-as', () => {
   test('non-admin -> 403', async () => {
     mockRequireAdmin.mockResolvedValue(NextResponse.json({ error: 'Forbidden' }, { status: 403 }))
-    const res = await DELETE()
+    const res = await DELETE(req())
     expect(res.status).toBe(403)
   })
 
   test('admin -> clears the cookie', async () => {
     mockRequireAdmin.mockResolvedValue({ userId: 'admin-1', role: 'admin' })
-    const res = await DELETE()
+    const res = await DELETE(req())
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ actingAs: null })
     expect(res.headers.get('set-cookie') || '').toMatch(/Max-Age=0/i)

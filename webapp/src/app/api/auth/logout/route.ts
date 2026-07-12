@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { AUTH_COOKIE_NAME, ACT_AS_COOKIE_NAME } from '@/lib/auth'
 import { writeAudit } from '@/lib/audit'
 import { getClientMeta } from '@/lib/requestMeta'
+import { isSecureRequest } from '@/lib/cookieSecurity'
 
 export async function POST(request: NextRequest) {
   const meta = getClientMeta(request)
@@ -13,7 +14,7 @@ export async function POST(request: NextRequest) {
   const expire = {
     httpOnly: true,
     sameSite: 'lax' as const,
-    secure: false,
+    secure: isSecureRequest(request), // S12
     path: '/',
     maxAge: 0,
   }

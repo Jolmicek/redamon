@@ -4,6 +4,7 @@ import { verifyPassword, createToken, AUTH_COOKIE_NAME } from '@/lib/auth'
 import { writeAudit } from '@/lib/audit'
 import { getClientMeta } from '@/lib/requestMeta'
 import { checkLockout, recordFailure, clearAttempts } from '@/lib/loginThrottle'
+import { isSecureRequest } from '@/lib/cookieSecurity'
 
 export async function POST(request: NextRequest) {
   try {
@@ -81,7 +82,7 @@ export async function POST(request: NextRequest) {
     response.cookies.set(AUTH_COOKIE_NAME, token, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: false,
+      secure: isSecureRequest(request), // S12: Secure over HTTPS, else plain HTTP works
       path: '/',
       maxAge: 7 * 24 * 60 * 60, // 7 days
     })
