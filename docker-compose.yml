@@ -25,7 +25,7 @@ services:
     cpus: ${POSTGRES_CPUS:-4}               # D1: CPU cap (generous; host has more)
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-redamon}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-redamon_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set - run redamon.sh (STRIDE S13)}
       POSTGRES_DB: ${POSTGRES_DB:-redamon}
     ports:
       # Loopback-only: app tier reaches Postgres over the internal `redamon`
@@ -55,7 +55,7 @@ services:
     pids_limit: ${NEO4J_PIDS:-1024}         # D1: fork-bomb ceiling (generous)
     cpus: ${NEO4J_CPUS:-8}                   # D1: CPU cap (generous)
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme123}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set - run redamon.sh (STRIDE S13)}
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*
       NEO4J_dbms_security_procedures_allowlist: apoc.*
@@ -433,10 +433,14 @@ services:
       # "myregistry.local/naabu:latest,myregistry.local/httpx:latest"). Empty =
       # strict shipped-only. Forwarded to the recon pipeline by container_manager.
       RECON_EXTRA_ALLOWED_IMAGES: ${RECON_EXTRA_ALLOWED_IMAGES:-}
+      # D3: global + per-user concurrent-scan ceilings enforced at admission.
+      # SAFE, GENEROUS DEFAULTS so unset resolves to a real limit (never "no cap").
+      RECON_MAX_CONCURRENT_GLOBAL: ${RECON_MAX_CONCURRENT_GLOBAL:-20}
+      RECON_MAX_CONCURRENT_PER_USER: ${RECON_MAX_CONCURRENT_PER_USER:-10}
       # Forwarded to spawned recon containers (host network, so localhost)
       NEO4J_URI: bolt://localhost:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set - run redamon.sh (STRIDE S13)}
       # Agent API for AI hooks in recon (e.g., FFuf AI-extension inference).
       # Spawned recon containers run on host network, so reach the agent via
       # its host-mapped port (default 8090) rather than the docker-network name.
@@ -572,6 +576,11 @@ services:
       # scoping server-side. Do not re-add NEO4J_PASSWORD here: a compromised
       # worker would otherwise get master read/write access to the whole graph.
       REDAMON_AGENT_URL: http://agent:8080
+      # S8/I8: /graph/exec now requires internal auth. The worker presents the
+      # SCOPED SCANNER_API_KEY (inbound-validation token, same category as
+      # MCP_AUTH_TOKEN) — NOT the master INTERNAL_API_KEY — so the "worker holds
+      # no master secrets" invariant is preserved. Fail-open if unset (dev).
+      SCANNER_API_KEY: "${SCANNER_API_KEY:-}"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 8000)); s.close()"]
@@ -602,11 +611,14 @@ services:
       # Neo4j (internal docker network)
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set - run redamon.sh (STRIDE S13)}
       # WebSocket config
       WS_HEARTBEAT_INTERVAL: "30"
       WS_TIMEOUT: "300"
       WS_MAX_MESSAGE_SIZE: "10485760"
+      # D10: fs_extract zip/tar/gz decompression caps (generous safe defaults).
+      FS_EXTRACT_MAX_ENTRIES: ${FS_EXTRACT_MAX_ENTRIES:-5000}
+      FS_EXTRACT_MAX_TOTAL_BYTES: ${FS_EXTRACT_MAX_TOTAL_BYTES:-524288000}
       # MCP tool servers (internal docker network)
       MCP_NETWORK_RECON_URL: http://kali-sandbox:8000/sse
       MCP_NUCLEI_URL: http://kali-sandbox:8002/sse
@@ -633,7 +645,7 @@ services:
       KB_PATH: /app/knowledge_base/data
       # Fireteam requires AsyncPostgresSaver for safe mid-wave checkpointing.
       PERSISTENT_CHECKPOINTER: "true"
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-redamon}:${POSTGRES_PASSWORD:-redamon_secret}@postgres:5432/${POSTGRES_DB:-redamon}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-redamon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set - run redamon.sh (STRIDE S13)}@postgres:5432/${POSTGRES_DB:-redamon}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -694,7 +706,7 @@ services:
     environment:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set - run redamon.sh (STRIDE S13)}
       KB_PATH: /app/knowledge_base/data
       NVD_API_KEY: "${NVD_API_KEY:-}"
     volumes:
@@ -772,11 +784,11 @@ services:
       - "${WEBAPP_PORT:-3000}:3000"
     environment:
       # PostgreSQL (Prisma)
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-redamon}:${POSTGRES_PASSWORD:-redamon_secret}@postgres:5432/${POSTGRES_DB:-redamon}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-redamon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set - run redamon.sh (STRIDE S13)}@postgres:5432/${POSTGRES_DB:-redamon}"
       # Neo4j (server-side graph queries)
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme123}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set - run redamon.sh (STRIDE S13)}
       # Auth
       AUTH_SECRET: ${AUTH_SECRET:-changeme}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-changeme}
@@ -786,6 +798,13 @@ services:
       # .env once logs confirm only known routes use the key. Wired here so it is
       # reachable via .env (webapp has no env_file).
       INTERNAL_KEY_ALLOWLIST_ENFORCE: ${INTERNAL_KEY_ALLOWLIST_ENFORCE:-false}
+      # S11: login lockout / backoff thresholds. SAFE DEFAULTS so an unset value
+      # fails safe to a real limit, never to "no limit".
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_LOCKOUT_SECONDS: ${LOGIN_LOCKOUT_SECONDS:-900}
+      # R5: mark X-Forwarded-For trustworthy only behind a proxy (public posture
+      # with nginx). Default false = local posture treats the IP as best-effort.
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       # Signs short-lived agent-WebSocket tickets the agent verifies (STRIDE S6).
       # Dedicated secret (NOT AUTH_SECRET) so agent-side exposure can't forge
       # login cookies. Empty in dev → no ticket minted, agent fails open.

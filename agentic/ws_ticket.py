@@ -13,10 +13,13 @@ Ticket format: a standard compact HS256 JWS produced by the webapp via `jose`
 Verification is stdlib-only (hmac/hashlib/base64) so the agent image needs no
 new dependency.
 
-Fail-open convention (mirrors the MCP `MCP_AUTH_TOKEN` design, S10): when
-`AGENT_WS_TICKET_SECRET` is unset the agent logs a one-time warning and accepts
-the init without a ticket, so dev / pre-generation stacks keep working. Real
-deployments get the secret from `redamon.sh ensure_auth_secrets`.
+Fail-CLOSED (STRIDE S2/S3/S4): when `AGENT_WS_TICKET_SECRET` is unset, the
+`/ws/agent`, `/ws/kali-terminal`, and both `/ws/cypherfix-*` handlers REJECT the
+connection (close 1008) instead of trusting a self-asserted identity. A stack
+brought up WITHOUT `redamon.sh` (which generates the secret via
+`ensure_auth_secrets`) therefore has non-functional WebSockets by design; run
+`redamon.sh` or set the secret. `verify_ws_ticket` also fails closed when the
+secret is configured but the ticket is missing/invalid/expired.
 """
 
 import base64
@@ -30,24 +33,70 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_warned_failopen = False
-
 
 def ticket_secret() -> str:
-    """Return the configured signing secret, or '' when unset (dev fail-open)."""
+    """Return the configured signing secret, or '' when unset. An empty value
+    makes every WS handler fail CLOSED (S2/S3/S4), not fail-open."""
     return os.environ.get("AGENT_WS_TICKET_SECRET", "") or ""
 
 
-def warn_ticket_failopen_once() -> None:
-    """Emit a single warning when running without a ticket secret."""
-    global _warned_failopen
-    if not _warned_failopen:
-        logger.warning(
-            "AGENT_WS_TICKET_SECRET is not set - /ws/agent init is accepted "
-            "without ticket verification (fail-open; dev only). Generate it via "
-            "redamon.sh to enforce WebSocket authentication (S6)."
-        )
-        _warned_failopen = True
+def check_ws_origin(origin: Optional[str], host: Optional[str], extra_allowed=None) -> bool:
+    """Server-side WebSocket Origin check (CSWSH defense; STRIDE S3/S4).
+
+    CORSMiddleware does NOT cover WebSocket handshakes, so each WS endpoint must
+    validate Origin itself. Rule (per the remediation plan):
+
+    - A missing Origin is allowed: CSWSH is a browser-only attack and browsers
+      always send Origin on a cross-site WS; non-browser tooling (which sends no
+      Origin) is still gated by the ticket, the primary control.
+    - Same-origin is the primary allow rule: the Origin's hostname must equal the
+      hostname of the Host the connection was reached on (cross-PORT on the same
+      host is allowed, matching the local LAN posture where the UI is :3000 and
+      the agent is :8090). This avoids the local-LAN regression a strict
+      _cors_origins-only gate would cause.
+    - extra_allowed (e.g. AGENT_CORS_ORIGINS) is an explicit superset for genuine
+      cross-origin deployments.
+    """
+    if not origin:
+        return True
+    allowed = {o.strip() for o in (extra_allowed or []) if o and o.strip()}
+    if origin in allowed:
+        return True
+    try:
+        from urllib.parse import urlparse
+        origin_host = urlparse(origin).hostname
+    except Exception:
+        return False
+    if not origin_host or not host:
+        return False
+    host_only = host.split(":")[0]
+    return origin_host == host_only
+
+
+def cors_allowlist():
+    """The agent's WS/CORS origin allowlist (same source as api.py's CORS)."""
+    default = "http://localhost:3000,http://127.0.0.1:3000"
+    return [o.strip() for o in os.getenv("AGENT_CORS_ORIGINS", default).split(",") if o.strip()]
+
+
+def authorize_ws(origin, host, ticket, extra_allowed=None):
+    """Combined WS gate for the raw-proxy endpoints (kali terminal, cypherfix):
+    same-origin check + fail-closed ticket verification.
+
+    Returns ``(ok, claims, reason)``: ``ok`` True only when the origin is allowed
+    AND a valid ticket verified against the configured secret. ``claims`` is the
+    verified claim dict on success (None otherwise). ``reason`` is a short string
+    for logging when rejected. Fails CLOSED when the secret is unset (S3/S4).
+    """
+    if not check_ws_origin(origin, host, extra_allowed):
+        return False, None, "disallowed origin"
+    secret = ticket_secret()
+    if not secret:
+        return False, None, "ticket auth not configured"
+    claims = verify_ws_ticket(ticket, secret)
+    if claims is None:
+        return False, None, "missing or invalid ticket"
+    return True, claims, "ok"
 
 
 def _b64url_decode(segment: str) -> bytes:

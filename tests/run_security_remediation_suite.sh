@@ -31,8 +31,42 @@ run "Integration: SSE auth round-trip (real MCP)" python3 mcp/servers/tests/test
 # S6/I14 host-runnable guard units (container-bound integration parts self-skip).
 # Full agent-side suites run via ./agentic/run_tests.sh; recon SSRF integration
 # runs in the recon image; webapp routes via `npx vitest run`.
-run "Unit: WS ticket verification (S6)"          python3 agentic/tests/test_ws_ticket_auth.py
+run "Unit: WS ticket verification (S6/S2)"       python3 agentic/tests/test_ws_ticket_auth.py
 run "Unit: JS-recon SSRF URL guard (I14)"        python3 recon/tests/test_js_recon_ssrf.py
+
+# --- Wave 2 (STRIDE remediation wave 2) host-runnable suites ---
+run "Unit: WS same-origin + ticket gate (S3/S4)" python3 agentic/tests/test_ws_origin_auth.py
+run "Unit: broker ownership gating (E1)"          python3 docker_broker/test_ownership.py
+run "Unit: broker plumbing regression"            python3 docker_broker/test_plumbing.py
+run "Unit: scan admission caps (D3)"              python3 tests/test_admission_ledger.py
+run "Unit: redagraph tenant + scanner key (S8)"   python3 tests/test_redagraph.py
+run "Unit: github-hunt stdout redaction (I4)"     python3 tests/test_github_hunt_redaction.py
+run "Unit: deploy patch integrity (T3)"           bash tests/deploy_patch_integrity_test.sh
+run "Unit: deploy.env cleanup (I7)"               bash tests/deploy_env_cleanup_test.sh
+
+# --- Agent-image-bound suites (need the baked deps; skip if image absent) ---
+if docker image inspect redamon-agent >/dev/null 2>&1; then
+    agent_test() {
+        docker run --rm -v "$REPO_ROOT/agentic:/app" -v "$REPO_ROOT/graph_db:/app/graph_db" \
+            -w /app redamon-agent python3 "$@"
+    }
+    run "Agent: /graph/exec auth + apoc.atomic (S8)" agent_test tests/test_graph_exec.py
+    run "Agent: fs_extract zip caps (D10)"           agent_test tests/test_fs_extract_caps.py
+    run "Agent: log redaction + generic error (I5)"  agent_test tests/test_log_redaction.py
+else
+    echo ">> SKIP agent-image suites (redamon-agent image not built)"
+fi
+
+# --- Webapp vitest suites (run if node_modules present) ---
+if [[ -x "$REPO_ROOT/webapp/node_modules/.bin/vitest" ]]; then
+    webapp_vitest() { ( cd "$REPO_ROOT/webapp" && ./node_modules/.bin/vitest run --no-file-parallelism "$@" ); }
+    run "Webapp: audit/auth/login/import routes (R1/R2/R5/S11/S12/D10)" webapp_vitest \
+        src/lib/audit.test.ts src/lib/loginThrottle.test.ts \
+        src/app/api/auth/login/route.test.ts src/app/api/auth/logout/route.test.ts \
+        src/app/api/auth/act-as/route.test.ts src/app/api/projects/import/route.test.ts
+else
+    echo ">> SKIP webapp vitest suites (webapp/node_modules absent)"
+fi
 
 # Security (skips if stack down)
 run "Security: reported exploit is blocked"      bash tests/test_exploit_blocked.sh

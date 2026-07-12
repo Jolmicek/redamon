@@ -27,7 +27,7 @@ from fastapi.responses import Response, JSONResponse
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel
 
-from llm_guard import require_internal_auth
+from llm_guard import require_internal_auth, require_internal_auth_only
 from logging_config import setup_logging
 from orchestrator import AgentOrchestrator
 from orchestrator_helpers import normalize_content
@@ -1076,7 +1076,7 @@ async def llm_takeover_classify(body: TakeoverClassifyRequest):
     }
 
 
-@app.post("/emergency-stop-all", tags=["System"])
+@app.post("/emergency-stop-all", tags=["System"], dependencies=[Depends(require_internal_auth_only)])
 async def emergency_stop_all():
     """Emergency stop: cancel every running agent task immediately."""
     if not ws_manager:
@@ -1372,7 +1372,7 @@ async def tradecraft_verify(body: TradecraftVerifyRequest):
         )
 
 
-@app.get("/mcp/manifest", tags=["MCP"])
+@app.get("/mcp/manifest", tags=["MCP"], dependencies=[Depends(require_internal_auth_only)])
 async def get_mcp_manifest():
     """
     Return the current MCP server manifest as seen by the agent.
@@ -1390,7 +1390,7 @@ async def get_mcp_manifest():
     }
 
 
-@app.post("/mcp/reload", tags=["MCP"])
+@app.post("/mcp/reload", tags=["MCP"], dependencies=[Depends(require_internal_auth_only)])
 async def reload_mcp_manifest(payload: dict = None):
     """
     Re-merge system + user MCP servers and reconnect the MCP client.
@@ -1414,7 +1414,7 @@ async def reload_mcp_manifest(payload: dict = None):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@app.post("/mcp/test", tags=["MCP"])
+@app.post("/mcp/test", tags=["MCP"], dependencies=[Depends(require_internal_auth_only)])
 async def test_mcp_server(server: dict):
     """
     Test connectivity to a single MCP server draft (NOT yet persisted).
@@ -1946,9 +1946,12 @@ async def test_llm_provider(body: LlmProviderTestRequest):
         return {"success": True, "response_text": text}
 
     except Exception as e:
+        # I5: log the detail server-side ONLY. The raw SDK/httpx error string can
+        # embed the Authorization header / API key; returning it to the settings
+        # UI would leak key material. Respond with a generic message instead.
         logger.error(f"LLM provider test failed: {e}")
         return JSONResponse(
-            content={"success": False, "error": str(e)},
+            content={"success": False, "error": "Provider test failed. Check the key, model, and base URL; see server logs for detail."},
             status_code=400,
         )
 
@@ -2775,12 +2778,22 @@ class GraphExecRequest(BaseModel):
     cypher: Optional[str] = None  # only for op="cypher"
 
 
-@app.post("/graph/exec", tags=["Graph"])
+@app.post("/graph/exec", tags=["Graph"], dependencies=[Depends(require_internal_auth_only)])
 async def graph_exec(body: GraphExecRequest):
     from graph_db.tenant_filter import find_disallowed_write_operation, inject_tenant_filter
 
     if not body.user_id or not body.project_id:
         return JSONResponse(status_code=400, content={"error": "missing tenant identity"})
+
+    # R12 (phased): the caller is now authenticated (require_internal_auth), but
+    # the tenant is still derived from the request BODY. Log the legacy body-
+    # identity use so the migration surface is observable; the enforce-flip
+    # (claim-derived tenant threaded from terminal->redagraph) is a tracked
+    # follow-on. A foothold inside the authenticated worker can still assert a
+    # tenant here — a strictly smaller surface than the prior anonymous LAN read.
+    logger.info(
+        "graph/exec: authenticated caller, body-identity tenant (R12 legacy path) "
+        "user=%s project=%s op=%s", body.user_id, body.project_id, body.op)
 
     op = body.op
     if op == "schema":
@@ -2830,12 +2843,41 @@ async def kali_terminal_proxy(websocket: WebSocket):
     Proxy WebSocket connection to the kali-sandbox PTY terminal server.
 
     Bridges the browser ↔ agent ↔ kali-sandbox terminal for interactive shell access.
+
+    STRIDE S3: this proxy is the authentication chokepoint. Before accepting the
+    handshake or dialing the upstream PTY it requires a valid ws-ticket (query
+    param ``ticket``) and a same-origin request. An unset AGENT_WS_TICKET_SECRET
+    fails CLOSED (mirrors S2). Identity is taken from the verified claims, never
+    from the browser's self-asserted frame, and forwarded to the upstream.
     """
+    from ws_ticket import authorize_ws
+
+    # Same-origin + fail-closed ticket gate BEFORE accept()/upstream dial.
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host")
+    ticket = websocket.query_params.get("ticket")
+    ok, claims, reason = authorize_ws(origin, host, ticket, _cors_origins)
+    if not ok:
+        logger.warning("Rejected /ws/kali-terminal: %s (origin=%r host=%r)", reason, origin, host)
+        await websocket.close(code=1008)
+        return
+
+    # Identity from the VERIFIED ticket, forwarded to the upstream PTY as query
+    # params (never from the browser's self-asserted frame).
+    from urllib.parse import urlencode, urlparse
+    _tenant = urlencode({
+        "user_id": str(claims["sub"]),
+        "project_id": str(claims["pid"]),
+        "session_id": str(claims["sid"]),
+    })
+    _sep = "&" if urlparse(_KALI_TERMINAL_WS_URL).query else "?"
+    upstream_url = f"{_KALI_TERMINAL_WS_URL}{_sep}{_tenant}"
+
     await websocket.accept()
 
     try:
         async with websockets.connect(
-            _KALI_TERMINAL_WS_URL,
+            upstream_url,
             ping_interval=30,
             ping_timeout=60,
             max_size=2**20,

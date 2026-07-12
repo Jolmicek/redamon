@@ -21,7 +21,7 @@ class LedgerTestBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         for k in ("REDAMON_MEM_GOVERNOR", "OS_HEADROOM_MEM", "SERVICE_BASELINE_MEM",
                   "RECON_JOB_ENVELOPE_MEM", "RECON_MAX_CONCURRENT_GLOBAL",
-                  "RESOURCE_PROFILE_PATH"):
+                  "RECON_MAX_CONCURRENT_PER_USER", "RESOURCE_PROFILE_PATH"):
             os.environ.pop(k, None)
         # Deterministic pool: 32G total, 30G available, 2G OS, 6G baseline -> 24G pool.
         rg.set_mem_override(32 * GB, 30 * GB)
@@ -33,7 +33,8 @@ class LedgerTestBase(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         rg.set_mem_override(None, None)
         for k in ("OS_HEADROOM_MEM", "SERVICE_BASELINE_MEM", "RECON_JOB_ENVELOPE_MEM",
-                  "RECON_MAX_CONCURRENT_GLOBAL", "REDAMON_MEM_GOVERNOR"):
+                  "RECON_MAX_CONCURRENT_GLOBAL", "RECON_MAX_CONCURRENT_PER_USER",
+                  "REDAMON_MEM_GOVERNOR"):
             os.environ.pop(k, None)
 
 
@@ -225,6 +226,56 @@ class TestEnvelopeAndSnapshot(LedgerTestBase):
             self.assertIn(key, snap)
         self.assertEqual(snap["committed"], 4 * GB)
         self.assertEqual(snap["active_scans"], 1)
+
+
+class TestScanCaps(LedgerTestBase):
+    """D3: global + per-user concurrent-scan ceilings."""
+
+    async def test_global_scan_cap(self):
+        os.environ["RECON_MAX_CONCURRENT_GLOBAL"] = "2"
+        led = al.ReservationLedger()
+        self.assertTrue((await led.try_admit("a", 1 * GB, user_id="u1")).admitted)
+        self.assertTrue((await led.try_admit("b", 1 * GB, user_id="u2")).admitted)
+        r = await led.try_admit("c", 1 * GB, user_id="u3")
+        self.assertFalse(r.admitted)
+        self.assertEqual(r.limit_type, "hard")
+        self.assertEqual(r.setting_name, "RECON_MAX_CONCURRENT_GLOBAL")
+
+    async def test_per_user_scan_cap(self):
+        os.environ["RECON_MAX_CONCURRENT_PER_USER"] = "2"
+        led = al.ReservationLedger()
+        self.assertTrue((await led.try_admit("a", 1 * GB, user_id="u1")).admitted)
+        self.assertTrue((await led.try_admit("b", 1 * GB, user_id="u1")).admitted)
+        # u1's 3rd is blocked...
+        r = await led.try_admit("c", 1 * GB, user_id="u1")
+        self.assertFalse(r.admitted)
+        self.assertEqual(r.setting_name, "RECON_MAX_CONCURRENT_PER_USER")
+        # ...but a DIFFERENT user is unaffected.
+        self.assertTrue((await led.try_admit("d", 1 * GB, user_id="u2")).admitted)
+
+    async def test_per_user_default_when_unset(self):
+        # Unset -> generous default (10), NOT "no cap".
+        led = al.ReservationLedger()
+        self.assertEqual(led.max_concurrent_per_user(), al._FALLBACK_PER_USER_CAP)
+
+    async def test_release_decrements_user_count(self):
+        os.environ["RECON_MAX_CONCURRENT_PER_USER"] = "1"
+        led = al.ReservationLedger()
+        self.assertTrue((await led.try_admit("a", 1 * GB, user_id="u1")).admitted)
+        self.assertFalse((await led.try_admit("b", 1 * GB, user_id="u1")).admitted)
+        # Release frees the slot; user can scan again (no leak/self-DoS).
+        await led.release("a")
+        self.assertEqual(led.user_active_count("u1"), 0)
+        self.assertTrue((await led.try_admit("b", 1 * GB, user_id="u1")).admitted)
+
+    async def test_reconcile_releases_user_count(self):
+        os.environ["RECON_MAX_CONCURRENT_PER_USER"] = "1"
+        led = al.ReservationLedger()
+        await led.try_admit("orphan", 1 * GB, user_id="u1")
+        # The scan died; reconcile with no active keys must free the user's slot.
+        led.reconcile(set())
+        self.assertEqual(led.user_active_count("u1"), 0)
+        self.assertTrue((await led.try_admit("fresh", 1 * GB, user_id="u1")).admitted)
 
 
 if __name__ == "__main__":

@@ -186,12 +186,14 @@ class ContainerManager:
         base = f"{kind}:{project_id}"
         return f"{base}:{run_id}" if run_id else base
 
-    async def _admit_scan(self, kind: str, project_id: str, run_id: Optional[str] = None) -> str:
+    async def _admit_scan(self, kind: str, project_id: str, run_id: Optional[str] = None,
+                          user_id: Optional[str] = None) -> str:
         """Reserve RAM for a scan of `kind`; raise AdmissionError if it doesn't fit.
-        Returns the reservation key (release via reconcile / release_nowait)."""
+        Returns the reservation key (release via reconcile / release_nowait).
+        `user_id` (D3) subjects the scan to the per-user concurrent-scan ceiling."""
         key = self._scan_key(kind, project_id, run_id)
         envelope = self.ledger.envelope_for(kind)
-        result = await self.ledger.try_admit(key, envelope)
+        result = await self.ledger.try_admit(key, envelope, user_id=user_id)
         if not result.admitted:
             logger.info(f"[governor] admission denied for {key}: {result.limit_type} - {result.detail}")
             raise AdmissionError(result)
@@ -454,7 +456,7 @@ class ContainerManager:
             raise ValueError(f"Partial recon(s) running for project {project_id}. Stop them first.")
 
         # Memory admission (Part 1): reserve this scan's RAM envelope or reject.
-        await self._admit_scan("full_recon", project_id)
+        await self._admit_scan("full_recon", project_id, user_id=user_id)
 
         # Clean up any existing container
         container_name = self._get_container_name(project_id)
@@ -1200,7 +1202,7 @@ class ContainerManager:
         container_name = self._get_partial_container_name(project_id, run_id)
 
         # Memory admission (Part 1): reserve this run's RAM envelope or reject.
-        await self._admit_scan("partial_recon", project_id, run_id)
+        await self._admit_scan("partial_recon", project_id, run_id, user_id=config.get("user_id"))
 
         state = PartialReconState(
             project_id=project_id,
@@ -1585,7 +1587,7 @@ class ContainerManager:
         tool = run_config.get("tool", "skeleton")
 
         # Memory admission (Part 1): reserve this run's RAM envelope or reject.
-        await self._admit_scan("ai_attack", project_id, run_id)
+        await self._admit_scan("ai_attack", project_id, run_id, user_id=user_id)
 
         state = AiAttackSurfaceState(
             project_id=project_id, run_id=run_id, tool=tool,
@@ -1967,7 +1969,7 @@ class ContainerManager:
             raise ValueError(f"GVM scan already active for project {project_id}")
 
         # Memory admission (Part 1): reserve this scan's RAM envelope or reject.
-        await self._admit_scan("gvm", project_id)
+        await self._admit_scan("gvm", project_id, user_id=user_id)
 
         # Clean up any existing container
         container_name = self._get_gvm_container_name(project_id)
@@ -2366,7 +2368,7 @@ class ContainerManager:
             raise ValueError(f"GitHub hunt already active for project {project_id}")
 
         # Memory admission (Part 1): reserve this scan's RAM envelope or reject.
-        await self._admit_scan("github_hunt", project_id)
+        await self._admit_scan("github_hunt", project_id, user_id=user_id)
 
         # Clean up any existing container
         container_name = self._get_github_hunt_container_name(project_id)
@@ -2751,7 +2753,7 @@ class ContainerManager:
             raise ValueError(f"TruffleHog scan already active for project {project_id}")
 
         # Memory admission (Part 1): reserve this scan's RAM envelope or reject.
-        await self._admit_scan("trufflehog", project_id)
+        await self._admit_scan("trufflehog", project_id, user_id=user_id)
 
         # Clean up any existing container
         container_name = self._get_trufflehog_container_name(project_id)

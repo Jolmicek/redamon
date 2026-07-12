@@ -9,10 +9,13 @@ control: every HTTP/WebSocket request must carry
 Behaviour:
 - ``MCP_AUTH_TOKEN`` set    -> require a matching bearer token (constant-time),
                                otherwise reply 401 (HTTP) / close 1008 (WS).
-- ``MCP_AUTH_TOKEN`` unset  -> FAIL OPEN and log a one-time warning, so dev
-  or empty                    stacks (and the loopback-only publish) keep working
-                               without a token. Fresh installs always get a token
-                               from redamon.sh ``ensure_auth_secrets``.
+- ``MCP_AUTH_TOKEN`` unset  -> FAIL CLOSED: reject every http/websocket request
+  or empty                    (401 / close 1008). Auth is not opportunistic; an
+                               absent token means "refuse", not "serve everyone".
+                               Fresh installs always get a token from redamon.sh
+                               ``ensure_auth_secrets`` (STRIDE S9). The ASGI
+                               ``lifespan`` scope still passes through so the
+                               server can boot.
 
 Implemented as a pure-ASGI wrapper (no Starlette/FastMCP-version coupling) so it
 composes with whatever SSE app the installed FastMCP builds. ``lifespan`` and any
@@ -59,20 +62,23 @@ class BearerAuthASGI:
         global _warned_failopen
 
         if scope.get("type") not in ("http", "websocket"):
-            # lifespan / other — never gate these.
+            # lifespan / other — never gate these, so the ASGI server can boot.
             await self.app(scope, receive, send)
             return
 
         expected = self._token_getter()
         if not expected:
+            # Fail CLOSED (STRIDE S9): an unset/empty MCP_AUTH_TOKEN means refuse,
+            # never serve-everyone. Log a one-time warning so the operator sees
+            # WHY every request is being rejected, then reject.
             if not _warned_failopen:
                 logger.warning(
-                    "MCP_AUTH_TOKEN is not set - MCP servers are serving WITHOUT "
-                    "bearer authentication (fail-open). Set MCP_AUTH_TOKEN to "
-                    "enforce it. Host ports are loopback-only by default."
+                    "MCP_AUTH_TOKEN is not set - MCP servers are REJECTING all "
+                    "requests (fail-closed). Set MCP_AUTH_TOKEN (redamon.sh does "
+                    "this automatically) to enable tool serving."
                 )
                 _warned_failopen = True
-            await self.app(scope, receive, send)
+            await self._reject(scope, send)
             return
 
         presented = _extract_bearer(scope.get("headers"))
@@ -121,23 +127,15 @@ def _build_sse_app(mcp):
 def serve_sse_with_auth(mcp, host: str, port: int) -> None:
     """Serve a FastMCP instance over SSE with the bearer wrapper applied.
 
-    Falls back to the unwrapped ``mcp.run()`` (with a loud error) if the app
-    cannot be built/served on the installed FastMCP version — the loopback-only
-    port publish remains the primary control in that degraded case, so we never
-    brick tool serving over an auth-wiring detail.
+    Fails CLOSED (STRIDE S9): if the wrapped app cannot be built/served on the
+    installed FastMCP version, the error propagates and the process crash-loops
+    (visible, fail-closed) instead of silently degrading to an UNAUTHENTICATED
+    ``mcp.run()``. There is no unwrapped fallback path.
     """
-    try:
-        import uvicorn
+    import uvicorn
 
-        app = _build_sse_app(mcp)
-        wrapped = BearerAuthASGI(app)
-        token_state = "enforced" if configured_token() else "fail-open (no token)"
-        logger.info("MCP SSE server on %s:%s - bearer auth %s", host, port, token_state)
-        uvicorn.run(wrapped, host=host, port=port, log_level="info")
-    except Exception as exc:  # noqa: BLE001 - last-resort safety net
-        logger.error(
-            "Could not start MCP SSE server with bearer auth (%s); falling back to "
-            "unauthenticated serving. Host ports are loopback-only.",
-            exc,
-        )
-        mcp.run(transport="sse", host=host, port=port)
+    app = _build_sse_app(mcp)
+    wrapped = BearerAuthASGI(app)
+    token_state = "enforced" if configured_token() else "fail-closed (no token)"
+    logger.info("MCP SSE server on %s:%s - bearer auth %s", host, port, token_state)
+    uvicorn.run(wrapped, host=host, port=port, log_level="info")

@@ -41,6 +41,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 
 # --------------------------------------------------------------------------
 # Policy (allowlist). Seeded from env so it can be kept in sync with V3.
@@ -99,6 +100,23 @@ ALLOWED_CAPS = {"NET_RAW", "NET_ADMIN", "CAP_NET_RAW", "CAP_NET_ADMIN"}
 _CREATE_RE = re.compile(r"^/(v[\d.]+/)?containers/create$")
 _HIJACK_RE = re.compile(r"^/(v[\d.]+/)?(containers/[^/]+/attach|exec/[^/]+/start)$")
 _IMAGES_CREATE_RE = re.compile(r"^/(v[\d.]+/)?images/create$")  # docker pull
+
+# E1: marker label injected into every broker-created container so operate-on-
+# existing verbs can be gated to broker-owned targets only. Without this, the
+# create-time allowlist is irrelevant to a hijack of a trusted infra container
+# (exec/attach into the orchestrator/broker -> host root).
+_OWNER_LABEL = "redamon.broker-owned"
+
+# Operate-on-EXISTING-container verbs (capture group 2 = the container id/name).
+# Gated to broker-owned targets. attach + exec-start are hijack endpoints handled
+# separately; exec-CREATE (POST /containers/{id}/exec) is gated here so a denied
+# exec never yields an exec id to start.
+_CONTAINER_OP_RE = re.compile(
+    r"^/(v[\d.]+/)?containers/([^/]+)/"
+    r"(exec|start|stop|kill|restart|wait|logs|archive|pause|unpause|update|rename|resize)$"
+)
+_CONTAINER_ATTACH_RE = re.compile(r"^/(v[\d.]+/)?containers/([^/]+)/attach$")
+_CONTAINERS_LIST_RE = re.compile(r"^/(v[\d.]+/)?containers/json$")
 
 
 def _normalize_path(path: str) -> str:
@@ -300,6 +318,117 @@ def inject_limits(cfg: dict) -> dict:
     return cfg
 
 
+def mark_owned(cfg: dict) -> dict:
+    """E1: stamp the broker-owned marker label onto a create body so operate
+    verbs can later verify ownership. Mutates and returns cfg."""
+    labels = cfg.get("Labels")
+    if not isinstance(labels, dict):
+        labels = {}
+        cfg["Labels"] = labels
+    labels[_OWNER_LABEL] = "1"
+    return cfg
+
+
+def _dechunk(body: bytes) -> bytes:
+    """Decode HTTP/1.1 chunked transfer-encoding into the raw body."""
+    out = b""
+    i = 0
+    while i < len(body):
+        j = body.find(b"\r\n", i)
+        if j < 0:
+            break
+        try:
+            size = int(body[i:j].split(b";", 1)[0], 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        start = j + 2
+        out += body[start:start + size]
+        i = start + size + 2  # skip the trailing CRLF
+    return out
+
+
+async def _upstream_inspect_labels(cid: str):
+    """Fetch a container's labels via an upstream GET /containers/{id}/json.
+    Returns the labels dict, or None if the container is absent / unparseable.
+    Reuses the same UPSTREAM_SOCK connection pattern as the forward path."""
+    r = w = None
+    try:
+        r, w = await asyncio.open_unix_connection(UPSTREAM_SOCK)
+        req = (f"GET /containers/{cid}/json HTTP/1.1\r\n"
+               f"Host: docker\r\nConnection: close\r\n\r\n").encode("latin1")
+        w.write(req)
+        await w.drain()
+        raw = await r.read()  # Connection: close -> read to EOF
+    except Exception:
+        return None
+    finally:
+        if w is not None:
+            try:
+                w.close()
+            except Exception:
+                pass
+    if b"\r\n\r\n" not in raw:
+        return None
+    head_b, body = raw.split(b"\r\n\r\n", 1)
+    head_text = head_b.decode("latin1")
+    status_line = head_text.split("\r\n", 1)[0]
+    # e.g. "HTTP/1.1 200 OK"
+    parts = status_line.split(" ")
+    if len(parts) < 2 or parts[1] != "200":
+        return None
+    if "transfer-encoding: chunked" in head_text.lower():
+        body = _dechunk(body)
+    try:
+        info = json.loads(body or b"{}")
+    except Exception:
+        return None
+    labels = (info.get("Config") or {}).get("Labels") or {}
+    return labels if isinstance(labels, dict) else {}
+
+
+async def _is_broker_owned(cid: str) -> bool:
+    labels = await _upstream_inspect_labels(cid)
+    return bool(labels) and labels.get(_OWNER_LABEL) == "1"
+
+
+def _rewrite_list_filters(head: bytes, path: str) -> bytes:
+    """E1: force the broker-owned label filter onto GET /containers/json so the
+    listing can only ever return broker-created containers (narrows, never
+    widens, whatever the client asked for). Rewrites the request-line target."""
+    base, _, query = path.partition("?")
+    params = urllib.parse.parse_qs(query, keep_blank_values=True)
+    filters = {}
+    if "filters" in params:
+        try:
+            filters = json.loads(params["filters"][0])
+        except Exception:
+            filters = {}
+    if not isinstance(filters, dict):
+        filters = {}
+    labels = filters.get("label")
+    if isinstance(labels, dict):
+        labels = list(labels.keys())
+    if not isinstance(labels, list):
+        labels = []
+    marker = f"{_OWNER_LABEL}=1"
+    if marker not in labels:
+        labels.append(marker)
+    filters["label"] = labels
+    params["filters"] = [json.dumps(filters)]
+    new_query = urllib.parse.urlencode(params, doseq=True)
+    new_target = base + ("?" + new_query if new_query else "")
+    head_text = head.decode("latin1")
+    nl = head_text.find("\r\n")
+    request_line = head_text[:nl] if nl >= 0 else head_text
+    rest = head_text[nl:] if nl >= 0 else ""
+    toks = request_line.split(" ")
+    if len(toks) >= 2:
+        toks[1] = new_target
+    return (" ".join(toks) + rest).encode("latin1")
+
+
 def validate_pull(path: str) -> tuple[bool, str]:
     """Validate docker pull (POST /images/create?fromImage=...&tag=...)."""
     q = path.split("?", 1)[1] if "?" in path else ""
@@ -383,13 +512,39 @@ async def handle_client(client_reader, client_writer):
         def _reject(reason: str):
             client_writer.write(_deny(reason))
 
+        # ---- E1: gate operate-on-EXISTING-container verbs to broker-owned targets.
+        # A compromised recon container must not be able to exec/attach/kill/etc.
+        # into a container the broker did not create (e.g. the orchestrator or the
+        # broker itself -> host root). exec-start uses an exec id (gated at
+        # exec-create); attach uses a container id (gated in the hijack branch).
+        attach_m = _CONTAINER_ATTACH_RE.match(path_only)
+        op_m = _CONTAINER_OP_RE.match(path_only)
+        if op_m:
+            cid = op_m.group(2)
+            if not await _is_broker_owned(cid):
+                _log(f"DENY {op_m.group(3)} on non-broker-owned container {cid!r}")
+                _reject_early = _deny(f"operation on non-broker-owned container {cid!r} denied")
+                client_writer.write(_reject_early)
+                await client_writer.drain()
+                return
+
         # ---- hijack endpoints: forward headers, then raw bidirectional pipe ----
         if _HIJACK_RE.match(path_only):
+            if attach_m and not await _is_broker_owned(attach_m.group(2)):
+                _log(f"DENY attach on non-broker-owned container {attach_m.group(2)!r}")
+                client_writer.write(_deny(f"attach to non-broker-owned container {attach_m.group(2)!r} denied"))
+                await client_writer.drain()
+                return
             up_reader, up_writer = await asyncio.open_unix_connection(UPSTREAM_SOCK)
             up_writer.write(head)
             await up_writer.drain()
             await asyncio.gather(_pipe(client_reader, up_writer), _pipe(up_reader, client_writer))
             return
+
+        # ---- E1: scope container listing to broker-owned so the pivot cannot
+        # even enumerate infra containers. Force a label filter onto the query. ----
+        if method == "GET" and _CONTAINERS_LIST_RE.match(path_only):
+            head = _rewrite_list_filters(head, path)
 
         # ---- read body (Content-Length) for validation/forwarding ----
         body = b""
@@ -419,9 +574,11 @@ async def handle_client(client_reader, client_writer):
                 _reject(reason)
                 await client_writer.drain()
                 return
-            # Memory governor (Part 4d): inject the hard mem cap, then re-serialize
-            # the body (Content-Length is corrected in the head rebuild below).
+            # Memory governor (Part 4d): inject the hard mem cap; E1: stamp the
+            # broker-owned marker label; then re-serialize the body (Content-Length
+            # is corrected in the head rebuild below).
             inject_limits(cfg)
+            mark_owned(cfg)
             body = json.dumps(cfg).encode("utf-8")
             body_modified = True
             _log(f"ALLOW create image={cfg.get('Image')!r} mem={cfg.get('HostConfig', {}).get('Memory')}")

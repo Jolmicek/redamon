@@ -147,16 +147,18 @@ class TunnelHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authorized(self) -> bool:
-        """Validate the inbound bearer token (constant-time). Fail-open when
-        TUNNEL_AUTH_TOKEN is unset, so dev/pre-generation stacks keep working."""
+        """Validate the inbound bearer token (constant-time). Fail-CLOSED when
+        TUNNEL_AUTH_TOKEN is unset (STRIDE S5): an absent token means REFUSE,
+        never accept-everyone. redamon.sh ensure_auth_secrets always sets it."""
         global _warned_failopen
         expected = _configured_token()
         if not expected:
             if not _warned_failopen:
-                print("[tunnel_manager] TUNNEL_AUTH_TOKEN not set - accepting "
-                      "config without auth (fail-open; dev only)")
+                print("[tunnel_manager] TUNNEL_AUTH_TOKEN not set - REJECTING "
+                      "tunnel config requests (fail-closed). Set the token to "
+                      "enable the tunnel control plane.")
                 _warned_failopen = True
-            return True
+            return False
         header = self.headers.get("Authorization", "") or ""
         presented = header[7:].strip() if header[:7].lower() == "bearer " else ""
         return bool(presented) and hmac.compare_digest(presented, expected)

@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0] - 2026-07-12
+
+### Security
+
+- **STRIDE remediation and threat model complete.** With wave 2 shipped ([5.5.0]), the STRIDE pass over RedAmon is closed: every enumerated threat is either remediated (fail-closed) or an explicitly accepted, documented residual. The threat model is finalized in [internal/security/README.TM.STRIDE.md](internal/security/README.TM.STRIDE.md), with the system-level view in [readmes/README.TM.SYSTEM_OVERVIEW.md](readmes/README.TM.SYSTEM_OVERVIEW.md).
+- **Consolidated security posture** published in [readmes/README.SECURITY_POSTURE.md](readmes/README.SECURITY_POSTURE.md) - a single reference for the enforced controls (auth, tenant isolation, fail-closed secrets, WS ticketing, rate/spend limits, audit logging), the trust boundaries, and the accepted residuals with their rationale.
+
+### Added
+
+- **Single-host deploy pipeline** under [deploy/single-host/](deploy/single-host/): a one-command `./deploy.sh init` that provisions and hardens a fresh host end to end (repo checkout, `redamon.sh` install, host tuning). Configuration is a single deploy-time `.env` with four public-access modes (`https-domain` / `https-ip` / `http-domain` / `http-ip`), TLS via Let's Encrypt / provided / self-signed, and defense-in-depth host hardening: nginx access gate + ufw allow-lists, key-only SSH, fail2ban, unattended security upgrades, and per-run shredding of the remote secrets. Idempotent `install` / `update` / `dev` flows converge to the same fully-enforced state.
+
+---
+
+## [5.5.0] - 2026-07-12
+
+### Security
+
+- **STRIDE remediation wave 2 - 22 threats closed, each an independently-verified, provably non-breaking commit** (plan: [internal/security/REMEDIATION_PLAN.WAVE2.md](internal/security/REMEDIATION_PLAN.WAVE2.md)). Every fail-open control now fails **closed** while staying non-breaking for real installs (all the required secrets already auto-generate via `redamon.sh`).
+  - **S9 / S5** - the Kali MCP bearer middleware and the tunnel-manager `:8015` now **reject** when their token is unset instead of serving everyone; no unauthenticated fallback on wrapper/import error ([mcp/servers/_auth_middleware.py](mcp/servers/_auth_middleware.py), [mcp/servers/run_servers.py](mcp/servers/run_servers.py), [mcp/servers/tunnel_manager.py](mcp/servers/tunnel_manager.py)).
+  - **S13** - default DB credentials are **fail-closed** in compose (`${VAR:?}`), and `ensure_db_secrets` now **rotates** an already-initialised default volume in place (ALTER the live DB first, then pin `.env`; Community-safe Neo4j `ALTER CURRENT USER`), fail-safe on error ([docker-compose.yml](docker-compose.yml), [redamon.sh](redamon.sh)).
+  - **S2 / S3 / S4** - `/ws/agent`, `/ws/kali-terminal`, and both `/ws/cypherfix-*` sockets require a signed ws-ticket + a server-side same-origin check; identity is bound from verified claims, not the self-asserted frame ([agentic/websocket_api.py](agentic/websocket_api.py), [agentic/api.py](agentic/api.py), [agentic/ws_ticket.py](agentic/ws_ticket.py), [agentic/cypherfix_triage/websocket_handler.py](agentic/cypherfix_triage/websocket_handler.py), [agentic/cypherfix_codefix/websocket_handler.py](agentic/cypherfix_codefix/websocket_handler.py) + the KaliTerminal/cypherfix hooks).
+  - **S8 / I8 / D7 / R12** - `/graph/exec` and `/emergency-stop-all` now require `require_internal_auth`; the Kali worker presents the scoped `SCANNER_API_KEY`; `apoc.atomic.*` added to the write-block; body-identity is dual-mode (logged) pending the R12 enforce wave ([agentic/api.py](agentic/api.py), [mcp/servers/redagraph.py](mcp/servers/redagraph.py), [graph_db/tenant_filter.py](graph_db/tenant_filter.py)).
+  - **E1** - the docker-broker now gates operate-on-existing verbs (exec/attach/kill/archive/...) to broker-owned containers via a marker label + upstream inspect, and scopes `GET /containers/json` to owned - closing the exec-into-infra → host-root pivot ([docker_broker/broker.py](docker_broker/broker.py)).
+  - **R1 / R2 / R5 / S11 / S12** - append-only `AuditLog`/`ActAsAudit` tables + nullable actor columns; act-as and auth events (login success/failure/logout, source IP) audited; in-memory per-account+per-IP login lockout (429 + `Retry-After`); the session cookie's `Secure` flag is now decided in-app from `x-forwarded-proto` ([webapp/prisma/schema.prisma](webapp/prisma/schema.prisma), [webapp/src/lib/audit.ts](webapp/src/lib/audit.ts), [webapp/src/lib/loginThrottle.ts](webapp/src/lib/loginThrottle.ts), [webapp/src/lib/cookieSecurity.ts](webapp/src/lib/cookieSecurity.ts), auth routes).
+  - **D3 / D10** - global + per-user concurrent-scan ceilings at admission (released on every termination path); project-import and agent `fs_extract` zip/tar/gz decompression caps ([recon_orchestrator/admission_ledger.py](recon_orchestrator/admission_ledger.py), [webapp/src/app/api/projects/import/route.ts](webapp/src/app/api/projects/import/route.ts), [agentic/workspace_fs.py](agentic/workspace_fs.py)).
+  - **I4 / I5** - harvested secret values no longer printed to github-hunt stdout; a log redaction filter scrubs token shapes from every agent handler, the LLM-provider test returns a generic error, and the leaked `codefix.log` PAT was purged (rotate it in GitHub) ([github_secret_hunt/github_secret_hunt.py](github_secret_hunt/github_secret_hunt.py), [agentic/logging_config.py](agentic/logging_config.py), [agentic/api.py](agentic/api.py)).
+  - **T3 / I7** - deploy patches are sha256-verified and fatal-on-failure (the secure-cookie and cypherfix-ws-origin patches were folded into the base app and dropped); the remote `deploy.env` + `cert/` are shred+removed on run exit ([deploy/single-host/deploy.sh](deploy/single-host/deploy.sh)).
+- New optional override knobs, all with **safe generous defaults** so unset fails safe to a real limit: `RECON_MAX_CONCURRENT_GLOBAL` (20), `RECON_MAX_CONCURRENT_PER_USER` (10), `LOGIN_MAX_ATTEMPTS` (5), `LOGIN_LOCKOUT_SECONDS` (900), `PROJECT_IMPORT_MAX_*`, `FS_EXTRACT_MAX_*`, `TRUST_PROXY`. No new secret is introduced. `install` and `update` converge to the same fully-enforced state (S13 rotates a legacy-default volume automatically on update).
+- Residuals accepted for this wave (documented in the plan risk register): R12 deep ticket-binding through terminal→redagraph deferred (endpoint is authenticated, tenant still body-derived); S5 loopback rebind dropped in favor of fail-closed bearer (would break the cross-container webapp caller); `/agent-session/stop` left unauthenticated. Release gate: [tests/run_security_remediation_suite.sh](tests/run_security_remediation_suite.sh) (all wave-2 suites + the live S6/I1 E2E green).
+
+---
+
 ## [5.4.0] - 2026-07-10
 
 ### Security

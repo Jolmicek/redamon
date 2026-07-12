@@ -366,7 +366,7 @@ class TestSettingsFieldConsistency:
 
 
 class TestTunnelManagerAuth:
-    """STRIDE I19/S14 — inbound bearer auth on :8015 (fail-open when unset)."""
+    """STRIDE I19/S14/S5 — inbound bearer auth on :8015 (fail-CLOSED when unset)."""
 
     def _server(self):
         import tunnel_manager
@@ -409,12 +409,15 @@ class TestTunnelManagerAuth:
             server.shutdown()
             os.environ.pop("TUNNEL_AUTH_TOKEN", None)
 
-    def test_fail_open_when_token_unset(self):
+    def test_tunnel_configure_rejects_without_token(self):
+        # STRIDE S5: with TUNNEL_AUTH_TOKEN unset the control plane fails CLOSED
+        # (rejects config), and /health stays open for the healthcheck.
         os.environ.pop("TUNNEL_AUTH_TOKEN", None)
         server, base = self._server()
         try:
-            # No token configured → accept without auth (dev fail-open).
-            assert self._req(f"{base}/tunnel/configure", "POST", token=None) == 200
+            assert self._req(f"{base}/tunnel/configure", "POST", token=None) == 401
+            assert self._req(f"{base}/tunnel/status", "GET", token=None) == 401
+            assert self._req(f"{base}/health", "GET", token=None) == 200
         finally:
             server.shutdown()
 

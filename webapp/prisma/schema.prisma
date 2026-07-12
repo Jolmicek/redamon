@@ -28,6 +28,10 @@ model User {
   defaultAiPipelineModel String?  @map("default_ai_pipeline_model")
   createdAt     DateTime          @default(now()) @map("created_at")
   updatedAt     DateTime          @updatedAt @map("updated_at")
+  // R1: nullable actor columns (who created/last-mutated this row). Populated
+  // going forward only; no default, no backfill, MUST stay nullable.
+  createdById   String?           @map("created_by_id")
+  updatedById   String?           @map("updated_by_id")
 
   @@map("users")
 }
@@ -64,6 +68,9 @@ model UserLlmProvider {
 
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
+  // R1: nullable actor columns (populated going forward only; MUST stay nullable).
+  createdById     String?  @map("created_by_id")
+  updatedById     String?  @map("updated_by_id")
 
   @@index([userId])
   @@map("user_llm_providers")
@@ -202,6 +209,9 @@ model Project {
   description String?
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
+  // R1: nullable actor columns (populated going forward only; MUST stay nullable).
+  createdById String?  @map("created_by_id")
+  updatedById String?  @map("updated_by_id")
 
   conversations               Conversation[]
   graphViews                  GraphView[]
@@ -995,6 +1005,9 @@ model Conversation {
   activeSkillId  String        @default("") @map("active_skill_id")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
+  // R1: nullable actor columns (populated going forward only; MUST stay nullable).
+  createdById    String?       @map("created_by_id")
+  updatedById    String?       @map("updated_by_id")
   messages       ChatMessage[]
   fireteams      Fireteam[]
 
@@ -1054,6 +1067,40 @@ model FireteamSettingsAudit {
   @@index([projectId, createdAt])
   @@index([field])
   @@map("fireteam_settings_audit")
+}
+
+// R1: general-purpose, append-only audit trail. Written by the R2/R5 call sites
+// (act-as, auth events) and any future privileged-mutation site. No enums (repo
+// convention: string with inline-comment enumeration). Never updated in place.
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")                 // who performed it (null = system/anonymous)
+  action     String                                    // e.g. "auth.login.success", "act-as.start"
+  targetType String   @map("target_type")              // e.g. "user", "project", "session"
+  targetId   String?  @map("target_id")
+  before     Json?
+  after      Json?
+  source     String   @default("api")                  // "api" | "ui" | "admin" | "system"
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([targetType, targetId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_log")
+}
+
+// R2: dedicated act-as (admin impersonation) audit. Append-only; the end row is
+// a separate insert (endedAt on its own row), never an in-place update.
+model ActAsAudit {
+  id           String   @id @default(cuid())
+  adminId      String   @map("admin_id")
+  targetUserId String   @map("target_user_id")
+  event        String                                  // "start" | "end"
+  source       String   @default("api")                // "api" | "self-clear"
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([adminId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("act_as_audit")
 }
 
 model FireteamMember {

@@ -26,6 +26,10 @@ import resource_governor as rg
 _FALLBACK_SERVICE_BASELINE = 6 * 1024 ** 3
 _FALLBACK_OS_HEADROOM = 2 * 1024 ** 3
 
+# D3: generous per-user concurrent-scan default when RECON_MAX_CONCURRENT_PER_USER
+# is unset. Fails SAFE to a real number, never to "no cap".
+_FALLBACK_PER_USER_CAP = 10
+
 
 class AdmissionError(ValueError):
     """Raised when a scan cannot be admitted. Subclasses ValueError so existing
@@ -70,6 +74,7 @@ class ReservationLedger:
         self._mem_reader = mem_reader
         self._pressure_fn = pressure_fn
         self._committed: Dict[str, int] = {}      # key -> reserved bytes
+        self._key_user: Dict[str, str] = {}       # D3: key -> owning user_id
         self._lock = asyncio.Lock()
 
     # --- configuration (read fresh so env changes / test overrides apply) -----
@@ -110,6 +115,20 @@ class ReservationLedger:
             return None
         return max(0, val)
 
+    def max_concurrent_per_user(self) -> int:
+        """D3: per-user concurrent-scan ceiling. Unset/invalid -> generous default
+        (fails safe to a number, never "no cap"). 0 blocks all of a user's scans."""
+        raw = os.environ.get("RECON_MAX_CONCURRENT_PER_USER")
+        if raw is None or raw.strip() == "":
+            return _FALLBACK_PER_USER_CAP
+        try:
+            return max(0, int(float(raw)))
+        except (TypeError, ValueError):
+            return _FALLBACK_PER_USER_CAP
+
+    def user_active_count(self, user_id: str) -> int:
+        return sum(1 for u in self._key_user.values() if u == user_id)
+
     # --- accounting -----------------------------------------------------------
 
     def committed_bytes(self) -> int:
@@ -126,19 +145,24 @@ class ReservationLedger:
 
     # --- admission ------------------------------------------------------------
 
-    async def try_admit(self, key: str, envelope: int) -> AdmissionResult:
+    async def try_admit(self, key: str, envelope: int, user_id: Optional[str] = None) -> AdmissionResult:
         """Reserve `envelope` bytes for `key` if it fits; otherwise reject with a
         typed reason. Idempotent: re-admitting an already-committed key is a no-op
-        success (keeps retries safe)."""
+        success (keeps retries safe). `user_id` (when supplied) is subject to the
+        per-user concurrent-scan ceiling (D3) and tracked for release symmetry."""
         if not rg.governor_enabled():
             async with self._lock:
                 self._committed[key] = envelope
+                if user_id is not None:
+                    self._key_user[key] = user_id
             return AdmissionResult(True)
         async with self._lock:
             if key in self._committed:
                 # Idempotent re-admit; keep the LARGER reservation so an escalated
                 # envelope never under-counts.
                 self._committed[key] = max(self._committed[key], envelope)
+                if user_id is not None:
+                    self._key_user.setdefault(key, user_id)
                 return AdmissionResult(True)
 
             # Secondary hard count cap (explicit operator ceiling; 0 blocks all).
@@ -149,12 +173,25 @@ class ReservationLedger:
                     ceiling=cap, setting_name="RECON_MAX_CONCURRENT_GLOBAL",
                     detail=f"{len(self._committed)} of {cap} concurrent scans allowed")
 
+            # D3: per-user hard count cap. `user_id` is server-derived (project.userId)
+            # so it is trustworthy; unset falls back to a generous default.
+            if user_id is not None:
+                per_user = self.max_concurrent_per_user()
+                cur = self.user_active_count(user_id)
+                if cur >= per_user:
+                    return AdmissionResult(
+                        False, limit_type="hard", current=cur, ceiling=per_user,
+                        setting_name="RECON_MAX_CONCURRENT_PER_USER",
+                        detail=f"{cur} of {per_user} concurrent scans allowed per user")
+
             # Fail OPEN: if host memory is unreadable (no /proc, restricted
             # container), the governor can't make a safe decision — admit rather
             # than deny everything. Matches resource_governor.scaled_cap's
             # fail-open contract so the two halves never disagree.
             if self._mem_reader() is None:
                 self._committed[key] = envelope
+                if user_id is not None:
+                    self._key_user[key] = user_id
                 return AdmissionResult(True)
 
             # Critical memory pressure blocks new work outright.
@@ -182,27 +219,34 @@ class ReservationLedger:
                     detail="not enough free memory to start this scan now")
 
             self._committed[key] = envelope
+            if user_id is not None:
+                self._key_user[key] = user_id
             return AdmissionResult(True)
 
     async def release(self, key: str) -> None:
         async with self._lock:
             self._committed.pop(key, None)
+            self._key_user.pop(key, None)  # D3: keep per-user count in lockstep
 
     def release_nowait(self, key: str) -> None:
         """Sync release for callers that aren't in an async context (dict pop is
         atomic under the GIL; safe against an awaiting try_admit which re-reads
         committed after acquiring the lock)."""
         self._committed.pop(key, None)
+        self._key_user.pop(key, None)  # D3
 
     def reconcile(self, active_keys) -> int:
         """Drop any reservation whose scan is no longer active. Leak-proof
         alternative to hooking every terminal path: the caller passes the set of
         keys that are genuinely still RUNNING/STARTING and we keep only those.
-        Returns the number of stale reservations released."""
+        Returns the number of stale reservations released. D3: the per-user map is
+        released here too so a crashed/orphaned scan cannot leak the user's count
+        and self-DoS them out of new scans."""
         active = set(active_keys)
         stale = [k for k in self._committed if k not in active]
         for k in stale:
             self._committed.pop(k, None)
+            self._key_user.pop(k, None)
         return len(stale)
 
     def envelope_for(self, scan_type: str) -> int:
