@@ -114,6 +114,27 @@ describe('POST /api/auth/login', () => {
     expect(httpRes.headers.get('set-cookie') || '').not.toMatch(/Secure/i)
   })
 
+  test('S11: untrusted (local) XFF is NOT used as a lockout key - no cross-user DoS', async () => {
+    // TRUST_PROXY unset -> ipTrusted=false -> per-IP key not created. One email's
+    // failures from the shared gateway IP must NOT lock a DIFFERENT email.
+    mockUserFindUnique.mockResolvedValue(null)
+    for (let i = 0; i < 3; i++) await POST(req({ email: 'victimA@x.com', password: 'x' }, { 'x-forwarded-for': '172.26.0.1' }))
+    // A different account from the SAME (untrusted) IP is still allowed to try.
+    const res = await POST(req({ email: 'victimB@x.com', password: 'x' }, { 'x-forwarded-for': '172.26.0.1' }))
+    expect(res.status).toBe(401) // not 429 - victimB is not locked by victimA's IP
+  })
+
+  test('S11: behind a trusted proxy, per-IP lockout DOES engage', async () => {
+    vi.stubEnv('TRUST_PROXY', 'true')
+    mockUserFindUnique.mockResolvedValue(null)
+    // 3 failures across different emails from one trusted client IP trip the IP key.
+    await POST(req({ email: 'a@x.com', password: 'x' }, { 'x-forwarded-for': '203.0.113.7' }))
+    await POST(req({ email: 'b@x.com', password: 'x' }, { 'x-forwarded-for': '203.0.113.7' }))
+    await POST(req({ email: 'c@x.com', password: 'x' }, { 'x-forwarded-for': '203.0.113.7' }))
+    const res = await POST(req({ email: 'd@x.com', password: 'x' }, { 'x-forwarded-for': '203.0.113.7' }))
+    expect(res.status).toBe(429) // IP key locked
+  })
+
   test('S11: a successful login clears the counter', async () => {
     // 2 failures, then success clears, so subsequent failures start fresh.
     mockUserFindUnique.mockResolvedValueOnce(null)
