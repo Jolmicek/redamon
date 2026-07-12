@@ -86,19 +86,27 @@ def run():
     st = _drive(None, headers=_bearer("s3cr3t-token"), scope_type="websocket")
     check("ws correct token -> downstream called", st["downstream"] is True)
 
-    # --- fail-open when unset ---
+    # --- fail-CLOSED when unset (STRIDE S9 regression) ---
+    # Named: test_empty_token_rejects_not_passthrough
     os.environ.pop("MCP_AUTH_TOKEN", None)
     _reset_warn()
     st = _drive(None, headers=[])
-    check("token unset -> fail-open (downstream called)", st["downstream"] is True)
-    check("token unset -> 200", st["status"] == 200)
+    check("token unset -> reject (downstream NOT called)", st["downstream"] is False)
+    check("token unset -> 401", st["status"] == 401)
     check("token unset -> warned flag set", mw._warned_failopen is True)
 
-    # empty string treated as unset
+    # unset token on websocket -> close 1008, not pass-through
+    _reset_warn()
+    st = _drive(None, headers=[], scope_type="websocket")
+    check("token unset (ws) -> close 1008", st["ws_close"] == 1008)
+    check("token unset (ws) -> downstream NOT called", st["downstream"] is False)
+
+    # empty string treated as unset -> also rejects (not pass-through)
     os.environ["MCP_AUTH_TOKEN"] = ""
     _reset_warn()
     st = _drive(None, headers=[])
-    check("empty token -> fail-open", st["downstream"] is True)
+    check("empty token -> reject (downstream NOT called)", st["downstream"] is False)
+    check("empty token -> 401", st["status"] == 401)
 
     # lifespan scope always passes through untouched
     _reset_warn()
@@ -116,9 +124,9 @@ def run():
 
     os.environ.pop("MCP_AUTH_TOKEN", None)
 
-    # Regression (serve_fallback_when_app_build_fails): if the SSE app cannot be
-    # built on this FastMCP version, serve_sse_with_auth must FALL BACK to
-    # mcp.run() instead of raising — otherwise run_servers would crash-loop.
+    # Regression (STRIDE S9): if the SSE app cannot be built on this FastMCP
+    # version, serve_sse_with_auth must FAIL CLOSED (raise / crash-loop) instead
+    # of falling back to an UNAUTHENTICATED mcp.run().
     class _FakeMcp:
         def __init__(self):
             self.ran = False
@@ -134,8 +142,13 @@ def run():
             self.ran = True
 
     fake = _FakeMcp()
-    mw.serve_sse_with_auth(fake, host="127.0.0.1", port=0)
-    check("serve falls back to mcp.run when app build fails", fake.ran is True)
+    raised = False
+    try:
+        mw.serve_sse_with_auth(fake, host="127.0.0.1", port=0)
+    except Exception:
+        raised = True
+    check("serve raises (fail-closed) when app build fails", raised is True)
+    check("serve does NOT fall back to unwrapped mcp.run", fake.ran is False)
 
     # report
     failed = [n for n, ok in results if not ok]
