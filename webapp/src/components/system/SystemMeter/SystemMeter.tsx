@@ -48,13 +48,13 @@ export function SystemMeter() {
 
   return (
     <div className={styles.wrap}>
-      <Meter label="RAM" pct={ramPct} tone="high" value={`${toGB(used)} GB used`} detail={ramTooltip} />
+      <Meter label="RAM" pct={ramPct} tone="high" value={`${toGB(used)}/${toGB(total, 0)} GB used`} detail={ramTooltip} />
       {diskTotal > 0 && (
         <Meter
           label="DISK"
           pct={diskPct}
           tone="high"
-          value={`${toGB(diskTotal - diskFree)} GB used`}
+          value={`${toGB(diskTotal - diskFree)}/${toGB(diskTotal, 0)} GB used`}
           detail={`${toGB(diskFree)} GB free of ${toGB(diskTotal)} GB (${Math.round(diskPct)}% used)`}
         />
       )}
