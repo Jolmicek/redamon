@@ -569,16 +569,25 @@ for p in 3000 8090; do
   elif printf '%s\n' "\$hits" | grep -qvE '^127\.0\.0\.1:|^\[::1\]:'; then err "port \${p} bound off-loopback: \$hits"; rc=1;
   else success "port \${p} loopback-only"; fi
 done
-step "Datastores/orchestrator must never bind off-loopback"
+step "Internal ports must never bind off-loopback (datastores, orchestrator, 4444 catcher)"
 db_bad=0
-for p in 5432 7474 7687 8010; do
+# 4444 is the reverse-shell catcher: loopback-bound at rest (exposed per-engagement
+# only via 'deploy.sh revshell-open', which adds a host-side socat forwarder, not a
+# docker port change), so its docker binding must always be loopback here.
+for p in 5432 7474 7687 8010 4444; do
   hits=\$(printf '%s\n' "\$LB" | grep -E "[:.]\${p}\b" || true)
   if [ -n "\$hits" ] && printf '%s\n' "\$hits" | grep -qvE '^127\.0\.0\.1:|^\[::1\]:'; then err "port \${p} off-loopback: \$hits"; rc=1; db_bad=1; fi
 done
-[ "\$db_bad" -eq 0 ] && success "datastores loopback-only"
+[ "\$db_bad" -eq 0 ] && success "internal ports loopback-only"
 step "Container health"
 sg docker -c "docker compose ps" || true
-[ -x "\$APP_PATH/tests/test_port_bindings.sh" ] && ( cd "\$APP_PATH" && sg docker -c "bash tests/test_port_bindings.sh" ) || info "test_port_bindings.sh not present -- skipping"
+# NB: tests/test_port_bindings.sh is a DEV/CI test that asserts webapp(3000),
+# agent(8090) and 4444 stay externally ROUTABLE -- the default (local) compose
+# posture. The single-origin prod overlay deliberately loopback-binds all three
+# (nginx:443 is the only public surface), so that test's expectation is inverted
+# here and the loopback checks above are the correct prod assertion. Do NOT run it
+# in prod: it would report false failures for the very hardening prod requires.
+info "single-origin prod: webapp/agent/4444 loopback by design (dev-only test_port_bindings.sh not run)"
 step "Admin present"
 cnt=\$(sg docker -c "docker compose exec -T webapp node scripts/check-admin.mjs" 2>/dev/null | tr -d '[:space:]')
 [ "\${cnt:-0}" -ge 1 ] 2>/dev/null && success "admin count = \${cnt}" || { err "no admin user found"; rc=1; }
