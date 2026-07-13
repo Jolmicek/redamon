@@ -126,6 +126,33 @@ check("ALLOW pull allowlisted", ok is True)
 ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=attacker/evil&tag=latest")
 check("DENY pull non-allowlisted", ok is False)
 
+# Fully-qualified docker.io/ auto-pull form (newer Docker daemons pull this way for
+# `docker run <img>` on a fresh host). These must resolve to the short allowlist names.
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=docker.io/projectdiscovery/naabu&tag=latest")
+check("ALLOW pull docker.io/ prefix", ok is True)
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=docker.io/library/alpine&tag=latest")
+check("ALLOW pull docker.io/library/ (official)", ok is True)
+# URL-encoded %2F form (exactly what the DENY logs showed in production).
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=docker.io%2Fprojectdiscovery%2Fkatana&tag=latest")
+check("ALLOW pull url-encoded docker.io%2F", ok is True)
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=docker.io%2Flibrary%2Falpine&tag=latest")
+check("ALLOW pull url-encoded docker.io%2Flibrary%2F", ok is True)
+# Non-default registry entries must still match verbatim (not stripped).
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=ghcr.io/zaproxy/zaproxy&tag=stable")
+check("ALLOW pull non-docker.io registry (ghcr.io)", ok is True)
+# Canonicalization must NOT widen the allowlist: a docker.io/ prefix on a
+# non-allowlisted image is still denied (fails closed).
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=docker.io/attacker/evil&tag=latest")
+check("DENY pull docker.io/ non-allowlisted", ok is False)
+ok, _ = broker.validate_pull("/v1.43/images/create?fromImage=docker.io%2Fattacker%2Fevil&tag=latest")
+check("DENY pull url-encoded non-allowlisted", ok is False)
+
+# The same canonicalization applies to container-create Image fields.
+ok, _ = broker.validate_create({"Image": "docker.io/projectdiscovery/httpx:latest"})
+check("ALLOW create docker.io/ prefix", ok is True)
+ok, _ = broker.validate_create({"Image": "docker.io/attacker/evil:latest"})
+check("DENY create docker.io/ non-allowlisted", ok is False)
+
 print()
 print(f"RESULT: PASS={PASS} FAIL={FAIL}")
 sys.exit(0 if FAIL == 0 else 1)

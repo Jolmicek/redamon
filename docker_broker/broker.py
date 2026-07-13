@@ -76,6 +76,41 @@ def _csv_env(name: str) -> list[str]:
 
 ALLOWED_IMAGES = set(_DEFAULT_ALLOWED_IMAGES) | set(_csv_env("DOCKER_BROKER_ALLOWED_IMAGES"))
 
+
+def _canonical_image(image: str) -> str:
+    """Canonicalize a Docker image reference for allowlist matching.
+
+    URL-decodes (docker sends `fromImage` percent-encoded, e.g. `%2F` for `/`),
+    then strips the *implicit* Docker Hub registry (`docker.io/`,
+    `index.docker.io/`) and the `library/` namespace of official images. This is
+    what makes the daemon's fully-qualified auto-pull form compare equal to the
+    short names operators put on the allowlist:
+
+        docker.io/projectdiscovery/naabu:latest -> projectdiscovery/naabu:latest
+        docker.io/library/alpine:latest         -> alpine:latest
+
+    A `docker run <img>` for an image that isn't present locally triggers the
+    daemon to pull `docker.io/<img>` (newer Docker/BuildKit fully-qualify it), so
+    without this every runtime tool pull on a fresh host is denied. Non-default
+    registries (e.g. `ghcr.io/...`) are left intact, so this only equates a
+    reference with its own default-registry spelling -- it never widens the set
+    of images that are allowed."""
+    if not image:
+        return image
+    image = urllib.parse.unquote(image)
+    for prefix in ("index.docker.io/", "docker.io/"):
+        if image.startswith(prefix):
+            image = image[len(prefix):]
+            break
+    if image.startswith("library/"):
+        image = image[len("library/"):]
+    return image
+
+
+# Precompute the canonical allowlist once (entries are short-form, but run through
+# the same canonicalizer so an operator-supplied `docker.io/...` extra also matches).
+_CANONICAL_ALLOWED = {_canonical_image(i) for i in ALLOWED_IMAGES}
+
 # Host bind-mount sources the tools legitimately need. Anything else (especially
 # "/" or the docker socket) is denied. Sources without a leading "/" are treated
 # as named volumes and checked against ALLOWED_VOLUMES.
@@ -140,11 +175,14 @@ def _log(msg: str) -> None:
 def _image_allowed(image: str) -> bool:
     if not image:
         return False
-    if image in ALLOWED_IMAGES:
+    # Canonicalize (URL-decode + strip the implicit docker.io/library prefixes) so
+    # the daemon's fully-qualified auto-pull form matches the short allowlist names.
+    canon = _canonical_image(image)
+    if canon in _CANONICAL_ALLOWED:
         return True
     # also accept the implicit ":latest" form (docker normalizes "alpine" ->
     # "alpine:latest"); accept if either spelling is allowlisted.
-    if ":" not in image.split("/")[-1] and f"{image}:latest" in ALLOWED_IMAGES:
+    if ":" not in canon.split("/")[-1] and f"{canon}:latest" in _CANONICAL_ALLOWED:
         return True
     return False
 
