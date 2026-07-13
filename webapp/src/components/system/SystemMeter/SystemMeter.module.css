@@ -7,7 +7,7 @@
 .meter {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   font-size: 11px;
   cursor: default;
 }
@@ -21,7 +21,7 @@
 .track {
   position: relative;
   display: inline-block;
-  width: 70px;
+  width: 49px;
   height: 8px;
   border-radius: 4px;
   background: var(--surface-3, rgba(128, 128, 128, 0.2));
@@ -49,8 +49,7 @@
 
 .pct {
   font-variant-numeric: tabular-nums;
-  width: 34px;
-  text-align: right;
+  text-align: left;
   color: var(--text-secondary, #888);
 }
 

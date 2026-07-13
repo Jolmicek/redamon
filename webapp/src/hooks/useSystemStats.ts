@@ -16,6 +16,7 @@ export interface SystemStats {
     pressure: 'ok' | 'warn' | 'critical'
   }
   cpu: { percent: number; cores: number }
+  disk?: { total: number; free: number } | null
   governor_enabled: boolean
 }
 

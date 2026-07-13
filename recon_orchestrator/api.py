@@ -302,9 +302,11 @@ async def system_stats():
     # Read-only: no reconcile side-effect here (the reaper owns release timing);
     # committed may lag by up to one reaper interval, which is fine for a display.
     mem = container_manager.ledger.snapshot() if container_manager else {}
+    disk = rg.disk_stats()
     return {
         "mem": mem,
         "cpu": {"percent": round(rg.cpu_percent(), 1), "cores": rg.cpu_cores()},
+        "disk": ({"total": disk[0], "free": disk[1]} if disk else None),
         "governor_enabled": rg.governor_enabled(),
     }
 

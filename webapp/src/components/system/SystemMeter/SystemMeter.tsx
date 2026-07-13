@@ -3,9 +3,10 @@
 import { useSystemStats, toGB } from '@/hooks/useSystemStats'
 import styles from './SystemMeter.module.css'
 
-function Meter({ label, pct, value, detail }: { label: string; pct: number; value?: string; detail: string }) {
+function Meter({ label, pct, value, detail, tone }: { label: string; pct: number; value?: string; detail: string; tone?: 'low' | 'mid' | 'high' }) {
   const clamped = Math.min(100, Math.max(0, pct))
-  const level = clamped > 90 ? 'high' : clamped > 70 ? 'mid' : 'low'
+  // `tone` forces a fixed color (CPU is a USAGE metric, shown red, not a free-space one).
+  const level = tone ?? (clamped > 90 ? 'high' : clamped > 70 ? 'mid' : 'low')
   return (
     <div className={styles.meter} title={detail}>
       <span className={styles.label}>{label}</span>
@@ -34,6 +35,11 @@ export function SystemMeter() {
   const ramPct = (100 * used) / total
   const cpuPct = data.cpu?.percent ?? 0
 
+  const disk = data.disk
+  const diskTotal = disk?.total ?? 0
+  const diskFree = disk?.free ?? 0
+  const diskPct = diskTotal > 0 ? (100 * (diskTotal - diskFree)) / diskTotal : 0
+
   const ramTooltip = [
     `${toGB(m.available)} GB free of ${toGB(total)} GB (${Math.round(ramPct)}% used)`,
     `${toGB(m.remaining_for_new)} GB available for a new scan` +
@@ -42,8 +48,17 @@ export function SystemMeter() {
 
   return (
     <div className={styles.wrap}>
-      <Meter label="RAM" pct={ramPct} value={`${toGB(m.available)} GB free`} detail={ramTooltip} />
-      <Meter label="CPU" pct={cpuPct} detail={`${Math.round(cpuPct)}% of ${data.cpu?.cores ?? '?'} cores`} />
+      <Meter label="RAM" pct={ramPct} tone="high" value={`${toGB(used)} GB used`} detail={ramTooltip} />
+      {diskTotal > 0 && (
+        <Meter
+          label="DISK"
+          pct={diskPct}
+          tone="high"
+          value={`${toGB(diskTotal - diskFree)} GB used`}
+          detail={`${toGB(diskFree)} GB free of ${toGB(diskTotal)} GB (${Math.round(diskPct)}% used)`}
+        />
+      )}
+      <Meter label="CPU" pct={cpuPct} tone="high" detail={`${Math.round(cpuPct)}% of ${data.cpu?.cores ?? '?'} cores`} />
     </div>
   )
 }

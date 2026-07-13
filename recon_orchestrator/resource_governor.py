@@ -26,6 +26,7 @@ This file is vendored identically into `recon_orchestrator/resource_governor.py`
 
 import json
 import os
+import shutil
 import time
 from typing import Optional, Tuple
 
@@ -230,6 +231,30 @@ def cpu_cores() -> int:
         return os.cpu_count() or 1
     except Exception:
         return 1
+
+
+# ---------------------------------------------------------------------------
+# Disk usage (for the /system/stats endpoint). The orchestrator bind-mounts the
+# host repo dir at /app, so statvfs there reflects the REAL host/EBS filesystem
+# (the disk operators care about), not the container overlay. Fails soft -> None.
+# ---------------------------------------------------------------------------
+
+# Ordered candidates: each is a host bind mount (compose), so it reports the host
+# filesystem; "/" is a last-resort container-overlay fallback.
+_DISK_PATHS = (os.environ.get("REDAMON_DISK_PATH", "/app"), "/tmp/redamon", "/app/recon/output", "/")
+
+
+def disk_stats() -> Optional[Tuple[int, int]]:
+    """Return (total_bytes, free_bytes) for the host filesystem backing the app
+    dir, or None if it cannot be read."""
+    for path in _DISK_PATHS:
+        try:
+            usage = shutil.disk_usage(path)
+            if usage.total > 0:
+                return (usage.total, usage.free)
+        except OSError:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
