@@ -27,7 +27,7 @@ export function maskMcpServersForApi(servers: MCPServer[]): MCPServer[] {
       next.auth = { ...srv.auth, token: maskSecret(srv.auth.token) }
     }
     const maskedHeaders = maskRecord(srv.headers as Record<string, string> | undefined)
-    if (maskedHeaders !== srv.headers) next.headers = maskedHeaders
+    if (maskedHeaders !== srv.headers) next.headers = maskedHeaders as MCPServer['headers']
     const inEnv = (srv as { env?: Record<string, string> }).env
     const maskedEnv = maskRecord(inEnv)
     if (maskedEnv !== inEnv) (next as { env?: Record<string, string> }).env = maskedEnv
