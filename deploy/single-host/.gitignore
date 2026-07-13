@@ -9,3 +9,6 @@ cert/*
 
 # The engineering blueprint stays local (it is the design doc, not an operator file).
 DEPLOY_PLAN_EC2.md
+
+# E2E test-run output stays local (generated report artifact, not an operator file).
+E2E_DEPLOY_TEST_RESULTS.md
