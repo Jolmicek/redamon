@@ -325,7 +325,12 @@ fi
 sg docker -c 'docker ps -aq | xargs -r docker rm -f' || true
 sg docker -c 'docker system prune -af --volumes' || true
 sg docker -c 'docker network prune -f' || true
-rm -rf "\$APP_PATH"
+# Use sudo: containers create root-owned files in bind-mounted repo subdirs
+# (recon_orchestrator/__pycache__, agentic/logs/agent.log, ...), which an unprivileged
+# rm cannot delete. Without sudo the checkout is left half-removed and the later
+# git clone fails ("destination path already exists and is not an empty directory"),
+# aborting every RE-init (a first init works only because the path does not exist yet).
+run_sudo rm -rf "\$APP_PATH"
 success "Teardown complete"
 EOF
 
